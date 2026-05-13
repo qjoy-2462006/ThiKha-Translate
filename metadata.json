@@ -1,0 +1,6 @@
+{
+  "name": "ThiKha Translate",
+  "description": "Layout-preserving PDF translator for Myanmar language, supporting scanned documents via Gemini Vision OCR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
