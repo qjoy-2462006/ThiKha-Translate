@@ -59,7 +59,7 @@ def process_pdf(pdf_file, api_key, domain, pages_range, font_file, progress=gr.P
     try:
         # Step 1: Extract
         progress(0.1, desc="Extracting PDF layout...")
-        blocks, processed_pages = extract_pdf_blocks(input_path, pages_range, api_key)
+        blocks, processed_pages, total_blocks = extract_pdf_blocks(input_path, pages_range, api_key)
         
         if not blocks:
             return None, "Extraction failed or no text found.", None, None
@@ -81,7 +81,8 @@ def process_pdf(pdf_file, api_key, domain, pages_range, font_file, progress=gr.P
 
         # Step 4: Write
         progress(0.85, desc="Generating Myanmar PDF...")
-        overflows = write_myanmar_pdf(input_path, output_path, blocks, font_file, api_key)
+        report = write_myanmar_pdf(input_path, output_path, blocks, font_file, api_key)
+        overflows = report.get("overflow_count", 0)
         
         elapsed = time.time() - start_time
         stats = {

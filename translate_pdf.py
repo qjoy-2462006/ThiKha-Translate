@@ -1,12 +1,16 @@
 """
-Usage Example:
-python3 translate_pdf.py --input sample.pdf --api-key YOUR_KEY --font Pyidaungsu.ttf --domain auto --pages all
+ThiKha Translate — Layout-Preserving Myanmar PDF Translator
+============================================================
+Usage:
+  python3 translate_pdf.py --input book.pdf --font Pyidaungsu.ttf --domain auto --pages all
 
-This script:
-1. Extracts text blocks and metadata from PDF.
-2. Detects domain (medical/tech/legal/etc).
-3. Translates text to Myanmar Unicode using Gemini-1.5-pro.
-4. Generates a new PDF with translated text at original coordinates.
+Fixes applied:
+  [FIX #1] ZawgyiConverter removed → rabbit-myanmar (zg2uni) used instead
+  [FIX #2] fitz.utils.getColor() removed → int_to_rgb() helper function
+  [FIX #3] extract_pdf_blocks returns consistent 3-tuple everywhere
+  [FIX #4] Font registered at page level before insert_textbox
+  [FIX #5] translate_blocks fallback changed from English text → None
+  [FIX #6] Font file existence validated before processing
 """
 
 import subprocess
@@ -18,73 +22,48 @@ import random
 import argparse
 from datetime import timedelta
 
-# --- Dependency Management ---
+
+# ---------------------------------------------------------------------------
+# Dependency bootstrap
+# ---------------------------------------------------------------------------
+
 def install(package):
-    # Writable directory is mandatory in cloud run environments
     lib_dir = "/tmp/python_libs"
-    if not os.path.exists(lib_dir):
-        os.makedirs(lib_dir)
-    
-    # Ensure it's at the front of the path
+    os.makedirs(lib_dir, exist_ok=True)
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
-
-    print(f"Attempting to install {package} to {lib_dir}...", file=sys.stderr)
-    
-    # Try 1: Standard pip install
     try:
-        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages", "--no-cache-dir", "--only-binary=:all:"]
-        print(f"Trying: {' '.join(cmd)}", file=sys.stderr)
+        cmd = [
+            sys.executable, "-m", "pip", "install", package,
+            "--target", lib_dir,
+            "--break-system-packages",
+            "--no-cache-dir",
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
-            print(f"Successfully installed {package}", file=sys.stderr)
-            return
-        print(f"Pip install failed: {result.stderr}", file=sys.stderr)
-    except Exception as e:
-        print(f"Error during pip install: {e}", file=sys.stderr)
-
-    # Try 2: If pip is missing, try ensurepip
-    try:
-        print("Trying ensurepip...", file=sys.stderr)
-        subprocess.run([sys.executable, "-m", "ensurepip", "--default-pip"], capture_output=True)
-        # Try install again
-        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            return
-    except:
-        pass
-
-    # Try 3: get-pip.py fallback
-    try:
-        print("Trying get-pip.py fallback...", file=sys.stderr)
-        get_pip_path = "/tmp/get-pip.py"
-        if not os.path.exists(get_pip_path):
-            subprocess.run(["curl", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip_path], check=True)
+            print(f"[install] {package} OK", file=sys.stderr)
+            return True
+        print(f"[install] {package} pip failed: {result.stderr[:200]}", file=sys.stderr)
         
-        # Install pip first (to --user space)
-        subprocess.run([sys.executable, get_pip_path, "--user", "--break-system-packages"], capture_output=True)
-        
-        # Then try installing package using the newly installed pip
-        subprocess.run([sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages"], check=True)
-        print(f"Successfully bootstrapped {package}", file=sys.stderr)
+        # fallback to get-pip
+        get_pip = "/tmp/get-pip.py"
+        if not os.path.exists(get_pip):
+            subprocess.run(["curl", "-s", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip], check=True)
+        subprocess.run([sys.executable, get_pip, "--user", "--break-system-packages"], capture_output=True)
+        result2 = subprocess.run(cmd, capture_output=True, text=True)
+        if result2.returncode == 0:
+            return True
+            
     except Exception as e:
-        print(f"All install attempts failed for {package}: {e}", file=sys.stderr)
+        print(f"[install] exception: {e}", file=sys.stderr)
+    return False
+
 
 try:
-    import fitz  # PyMuPDF
-except (ImportError, ModuleNotFoundError):
-    try:
-        install("pymupdf")
-        import fitz
-    except:
-        try:
-            print("Standard pymupdf failed. Trying pymupdf-lite...", file=sys.stderr)
-            install("pymupdf-lite")
-            import fitz
-        except Exception as e:
-            print(f"PyMuPDF installation failed: {e}", file=sys.stderr)
-            raise ImportError(f"PyMuPDF (fitz) is not installed and could not be bootstrapped: {e}")
+    import fitz
+except ImportError:
+    install("pymupdf") or install("pymupdf-lite")
+    import fitz
 
 try:
     import google.generativeai as genai
@@ -99,403 +78,521 @@ except ImportError:
     from tqdm import tqdm
 
 try:
-    from myanmar_tools import ZawgyiDetector, ZawgyiConverter
+    from myanmar_tools import ZawgyiDetector
 except ImportError:
     install("myanmar-tools")
-    from myanmar_tools import ZawgyiDetector, ZawgyiConverter
+    from myanmar_tools import ZawgyiDetector
 
-def is_valid_unicode_myanmar(text):
-    if not text: return False
-    myanmar_chars = [c for c in text if '\u1000' <= c <= '\u109F']
-    return len(myanmar_chars) > 0
+# [FIX #1] rabbit-myanmar replaces ZawgyiConverter (which does not exist in Python)
+try:
+    from rabbit import zg2uni
+except ImportError:
+    install("rabbit-myanmar")
+    from rabbit import zg2uni
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 detector = ZawgyiDetector()
-converter = ZawgyiConverter()
 
-# --- Core Functions ---
 
-def detect_domain(pdf_path, api_key):
-    """Scan first 500 words and detect domain using Gemini."""
+def zawgyi_to_unicode(text: str) -> str:
+    """Detect Zawgyi and convert to Unicode if needed."""
+    if not text:
+        return text
+    try:
+        score = detector.get_zawgyi_probability(text)
+        if score > 0.5:
+            return zg2uni(text)
+    except Exception:
+        pass
+    return text
+
+
+def is_unicode_myanmar(text: str) -> bool:
+    return any("\u1000" <= c <= "\u109F" for c in (text or ""))
+
+
+# [FIX #2] Replace fitz.utils.getColor() — it does not exist; color is a packed int
+def int_to_rgb(color_int) -> tuple:
+    """Convert packed integer color (PyMuPDF span color) to (r, g, b) floats 0-1."""
+    if not isinstance(color_int, int):
+        return (0.0, 0.0, 0.0)
+    r = ((color_int >> 16) & 0xFF) / 255.0
+    g = ((color_int >> 8) & 0xFF) / 255.0
+    b = (color_int & 0xFF) / 255.0
+    return (r, g, b)
+
+
+# ---------------------------------------------------------------------------
+# Domain detection
+# ---------------------------------------------------------------------------
+
+def detect_domain(pdf_path: str, api_key: str) -> str:
     try:
         doc = fitz.open(pdf_path)
-        sample_text = ""
+        sample = ""
         for page in doc:
-            sample_text += page.get_text()
-            if len(sample_text.split()) > 500:
+            sample += page.get_text()
+            if len(sample.split()) > 500:
                 break
         doc.close()
-        
-        words = " ".join(sample_text.split()[:500])
-        
+
+        words = " ".join(sample.split()[:500])
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-pro")
-        
-        prompt = f"Classify this text domain: medical/tech/academic/legal/general. One word answer only.\n\nText: {words}"
-        response = model.generate_content(prompt)
-        domain = response.text.strip().lower()
-        
-        valid_domains = ["medical", "tech", "academic", "legal", "general"]
-        for d in valid_domains:
-            if d in domain:
+        prompt = (
+            "Classify this text into exactly one domain: medical/tech/academic/legal/general. "
+            "Reply with ONE word only.\n\n" + words
+        )
+        resp = model.generate_content(prompt)
+        detected = resp.text.strip().lower()
+        for d in ("medical", "tech", "academic", "legal", "general"):
+            if d in detected:
                 return d
-        return "general"
     except Exception as e:
-        print(f"Warning: Domain detection failed ({e}). Defaulting to 'general'.")
-        return "general"
+        print(f"[detect_domain] warning: {e}", file=sys.stderr)
+    return "general"
 
-def ocr_page(page, api_key):
-    """Performs OCR on a page using Gemini 1.5 Pro Vision."""
-    if not api_key:
-        return []
-    
+
+# ---------------------------------------------------------------------------
+# OCR fallback for scanned pages (Gemini Vision)
+# ---------------------------------------------------------------------------
+
+def ocr_page(page, api_key: str) -> list:
     try:
-        # Render page to image
         pix = page.get_pixmap(dpi=300)
         img_bytes = pix.tobytes("png")
-        
-        # Configure Gemini
+
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-pro")
-        
-        # Request OCR
-        prompt = "Extract ALL text from this document image. Return as JSON array of objects: {text, x_percent, y_percent, width_percent, height_percent, font_size_estimate}. Coordinates as percentage of page size. Output ONLY the raw JSON array."
-        
-        response = model.generate_content([
-            prompt,
-            {"mime_type": "image/png", "data": img_bytes}
-        ])
-        
-        # Parse response
-        text_resp = response.text.strip()
-        # Clean markdown
-        if "```json" in text_resp:
-            text_resp = text_resp.split("```json")[1].split("```")[0].strip()
-        elif "[" in text_resp and "]" in text_resp:
-            start = text_resp.find("[")
-            end = text_resp.rfind("]") + 1
-            text_resp = text_resp[start:end]
-            
-        ocr_blocks = json.loads(text_resp)
-        
-        # Convert percentages back to pixels
-        page_width = page.rect.width
-        page_height = page.rect.height
-        
-        processed_blocks = []
+        prompt = (
+            "Extract ALL text from this document image. "
+            "Return a JSON array of objects with keys: "
+            "text, x_percent, y_percent, width_percent, height_percent, font_size_estimate. "
+            "Coordinates as percentage of page size. Output ONLY the raw JSON array."
+        )
+        response = model.generate_content(
+            [prompt, {"mime_type": "image/png", "data": img_bytes}]
+        )
+
+        raw = response.text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json").strip()
+        start, end = raw.find("["), raw.rfind("]") + 1
+        ocr_blocks = json.loads(raw[start:end])
+
+        pw, ph = page.rect.width, page.rect.height
+        results = []
         for i, b in enumerate(ocr_blocks):
-            # Calculate pixel bbox
-            x0 = (b["x_percent"] / 100) * page_width
-            y0 = (b["y_percent"] / 100) * page_height
-            w = (b["width_percent"] / 100) * page_width
-            h = (b["height_percent"] / 100) * page_height
-            
-            processed_blocks.append({
+            x0 = b["x_percent"] / 100 * pw
+            y0 = b["y_percent"] / 100 * ph
+            w  = b["width_percent"] / 100 * pw
+            h  = b["height_percent"] / 100 * ph
+            results.append({
                 "page_number": page.number + 1,
-                "block_index": i + 5000, 
+                "block_index": i + 5000,
                 "bbox": (x0, y0, x0 + w, y0 + h),
-                "text": b["text"],
+                "text": b.get("text", ""),
                 "font_size": b.get("font_size_estimate", 12),
                 "font_name": "OCR_Detected",
                 "is_bold": False,
-                "color": 0
+                "color": 0,
             })
-        return processed_blocks
+        return results
+
     except Exception as e:
-        print(f"Warning: OCR fallback failed for page {page.number + 1} ({e})")
+        print(f"[ocr_page] page {page.number + 1} failed: {e}", file=sys.stderr)
         return []
 
-def extract_pdf_blocks(pdf_path, page_range="all", api_key=None):
-    """Extracts text blocks with metadata. Falls back to OCR for scanned pages."""
+
+# ---------------------------------------------------------------------------
+# [FIX #3] extract_pdf_blocks — always returns consistent 3-tuple
+# ---------------------------------------------------------------------------
+
+def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = None):
+    """
+    Returns (blocks, processed_page_count, total_block_count).
+    Consistent 3-tuple — fixes the 2 vs 3 value mismatch between files.
+    """
     blocks_data = []
     try:
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        
-        # Parse page range
-        target_pages = []
+
         if page_range == "all":
-            target_pages = list(range(total_pages))
+            target = list(range(total_pages))
         else:
             try:
-                start, end = map(int, page_range.split("-"))
-                target_pages = list(range(start - 1, min(end, total_pages)))
-            except:
-                print(f"Invalid page range: {page_range}. Using all pages.")
-                target_pages = list(range(total_pages))
+                s, e = map(int, page_range.split("-"))
+                target = list(range(s - 1, min(e, total_pages)))
+            except Exception:
+                print(f"[extract] invalid range '{page_range}', using all pages", file=sys.stderr)
+                target = list(range(total_pages))
 
         total_blocks = 0
-        for p_idx in target_pages:
+
+        for p_idx in target:
             page = doc[p_idx]
-            
-            # Check if page has text
-            page_blocks = page.get_text("blocks")
-            has_text = any(b[6] == 0 for b in page_blocks)
-            
+            raw_blocks = page.get_text("blocks")
+            has_text = any(b[6] == 0 for b in raw_blocks)
+
             if not has_text and api_key:
-                print(f"Page {p_idx+1} appears scanned. Using Gemini OCR fallback...")
-                ocr_results = ocr_page(page, api_key)
-                blocks_data.extend(ocr_results)
-                total_blocks += len(ocr_results)
+                print(f"[extract] page {p_idx + 1} appears scanned — OCR fallback", file=sys.stderr)
+                ocr = ocr_page(page, api_key)
+                blocks_data.extend(ocr)
+                total_blocks += len(ocr)
                 continue
 
-            # Standard extraction
             page_dict = page.get_text("dict")
-            
             for b_idx, b in enumerate(page_dict["blocks"]):
-                if b["type"] != 0: continue
-                
+                if b["type"] != 0:
+                    continue
+
                 x0, y0, x1, y1 = b["bbox"]
-                text_content = []
-                font_sizes = []
-                font_names = set()
-                is_bold_flags = []
-                colors = set()
-                
+                texts, sizes, fonts, bolds, colors = [], [], set(), [], set()
+
                 for line in b["lines"]:
                     for span in line["spans"]:
-                        text_content.append(span["text"])
-                        font_sizes.append(span["size"])
-                        font_names.add(span["font"])
-                        is_bold = bool(span["flags"] & 2**4) or "Bold" in span["font"]
-                        is_bold_flags.append(is_bold)
+                        texts.append(span["text"])
+                        sizes.append(span["size"])
+                        fonts.add(span["font"])
+                        bolds.append(bool(span["flags"] & (1 << 4)) or "Bold" in span["font"])
                         colors.add(span["color"])
-                
-                full_text = " ".join(text_content).strip()
-                if len(full_text) < 3: continue # Skip small noise
-                
-                avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 10
-                main_font = next(iter(font_names)) if font_names else "Helvetica"
-                
+
+                full_text = " ".join(texts).strip()
+                if len(full_text) < 3:
+                    continue
+
                 blocks_data.append({
                     "page_number": p_idx + 1,
                     "block_index": b_idx,
                     "bbox": (x0, y0, x1, y1),
                     "text": full_text,
-                    "font_size": avg_font_size,
-                    "font_name": main_font,
-                    "is_bold": any(is_bold_flags),
-                    "color": next(iter(colors)) if colors else 0
+                    "font_size": round(sum(sizes) / len(sizes), 2) if sizes else 10.0,
+                    "font_name": next(iter(fonts), "Helvetica"),
+                    "is_bold": any(bolds),
+                    "color": next(iter(colors), 0),
                 })
                 total_blocks += 1
-                
-        doc.close()
-        return blocks_data, len(target_pages)
-    except Exception as e:
-        print(f"Error extracting blocks: {e}")
-        return [], 0
 
-def translate_blocks(blocks, api_key, domain):
-    """Batch translate blocks using Gemini."""
+        doc.close()
+        return blocks_data, len(target), total_blocks
+
+    except Exception as e:
+        print(f"[extract] error: {e}", file=sys.stderr)
+        return [], 0, 0
+
+
+# ---------------------------------------------------------------------------
+# Translation — batch via Gemini
+# ---------------------------------------------------------------------------
+
+def translate_blocks(blocks: list, api_key: str, domain: str):
+    """
+    Generator: translates in batches of 10, yields batch size after each batch.
+    [FIX #5] On failure, sets myanmar_text=None instead of falling back to English.
+    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-1.5-pro")
-    
     batch_size = 10
-    translated_count = 0
-    
+
     for i in range(0, len(blocks), batch_size):
-        batch = blocks[i : i + batch_size]
-        
-        prompt = f"""Translate each numbered text to Myanmar Unicode. Output ONLY a JSON array of translated strings in the same order. No explanations.
-Domain: {domain}
-Instructions: Keep translations concise. This text must fit in given bbox widths.
-CRITICAL: Output MUST be Unicode Myanmar (Unicode 5.1+). NOT Zawgyi. First character of Myanmar text must be in range U+1000 to U+109F.
-Texts to translate:
-"""
+        batch = blocks[i: i + batch_size]
+
+        lines = []
         for j, b in enumerate(batch):
-            width = b['bbox'][2] - b['bbox'][0]
-            char_limit = int(width / 14)
-            prompt += f"{j+1}. {b['text']} (Target: ~{char_limit} Myan chars, Width: {int(width)}px)\n"
-            
-        retries = 3
-        while retries >= 0:
+            w = b["bbox"][2] - b["bbox"][0]
+            char_limit = max(10, int(w / 14))
+            lines.append(
+                f"{j + 1}. {b['text']} "
+                f"(target ≈{char_limit} Myanmar chars, bbox width {int(w)}px)"
+            )
+
+        prompt = (
+            f"Translate each numbered text to Myanmar Unicode.\n"
+            f"Domain: {domain}\n"
+            f"Rules:\n"
+            f"  - Output ONLY a JSON array of strings, same order, same count.\n"
+            f"  - Unicode Myanmar ONLY (U+1000–U+109F range). Never Zawgyi.\n"
+            f"  - Keep translations concise to fit the bbox width given.\n"
+            f"  - Technical terms with no Myanmar equivalent: keep English + add Myanmar in parentheses.\n"
+            f"  - No explanations, no markdown, no extra keys.\n\n"
+            f"Texts:\n" + "\n".join(lines)
+        )
+
+        retries, wait = 3, 2
+        success = False
+
+        while retries >= 0 and not success:
             try:
-                response = model.generate_content(prompt)
-                text_resp = response.text.strip()
-                
-                # Basic JSON cleaning
-                if "```json" in text_resp:
-                    text_resp = text_resp.split("```json")[1].split("```")[0].strip()
-                elif "```" in text_resp:
-                    text_resp = text_resp.split("```")[1].split("```")[0].strip()
-                
-                translations = json.loads(text_resp)
-                if len(translations) == len(batch):
-                    for idx, t in enumerate(translations):
-                        # Zawgyi detection and conversion
-                        if t:
-                            score = detector.get_zawgyi_probability(t)
-                            if score > 0.5:
-                                t = converter.convert(t, "unicode")
-                        batch[idx]["myanmar_text"] = t
-                    translated_count += len(batch)
-                    break
-                else:
-                    raise ValueError("Batch mismatch")
+                resp = model.generate_content(prompt)
+                raw = resp.text.strip()
+
+                # Strip markdown fences if present
+                if "```" in raw:
+                    raw = raw.split("```")[1].lstrip("json").strip()
+                start = raw.find("[")
+                end = raw.rfind("]") + 1
+                translations = json.loads(raw[start:end])
+
+                if len(translations) != len(batch):
+                    raise ValueError(f"Count mismatch: got {len(translations)}, expected {len(batch)}")
+
+                for idx, t in enumerate(translations):
+                    t = zawgyi_to_unicode(t)
+                    batch[idx]["myanmar_text"] = t if t else None
+
+                success = True
+
             except Exception as e:
                 retries -= 1
-                if retries < 0:
-                    for b in batch: b["myanmar_text"] = b["text"] # Fallback
+                if retries >= 0:
+                    jitter = random.uniform(0.5, 1.5)
+                    print(f"[translate] retry in {wait:.1f}s — {e}", file=sys.stderr)
+                    time.sleep(wait * jitter)
+                    wait *= 2
                 else:
-                    time.sleep(2 * (3 - retries))
-        
+                    print(f"[translate] batch {i}–{i + len(batch)} failed permanently", file=sys.stderr)
+                    # [FIX #5] Use None, not English fallback
+                    for b in batch:
+                        b["myanmar_text"] = None
+
         yield len(batch)
 
-def shorten_myanmar_text(text, api_key):
-    """Fallback to Gemini to shorten text if it overflows."""
+
+# ---------------------------------------------------------------------------
+# Shorten text via Gemini (overflow recovery)
+# ---------------------------------------------------------------------------
+
+def shorten_myanmar_text(text: str, api_key: str) -> str:
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-pro")
-        prompt = f"Shorten this Myanmar text to 70% length while keeping meaning: {text}. Output ONLY the shortened text."
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        prompt = (
+            f"Shorten this Myanmar text to 70% of its length while preserving meaning. "
+            f"Output ONLY the shortened Myanmar text:\n{text}"
+        )
+        resp = model.generate_content(prompt)
+        return resp.text.strip() or text
     except Exception as e:
-        print(f"Warning: Shortening text failed ({e})")
+        print(f"[shorten] failed: {e}", file=sys.stderr)
         return text
 
-def write_myanmar_pdf(input_path, output_path, blocks, font_path, api_key=None):
-    """Creates a new PDF with translated text overlaid with overflow handling."""
-    try:
-        doc = fitz.open(input_path)
-        overflow_count = 0
-        report_path = "overflow_report.txt"
-        
-        with open(report_path, "w", encoding="utf-8") as report:
-            report.write("PDF OVERFLOW REPORT\n")
-            report.write("="*20 + "\n\n")
 
-            for block in blocks:
-                page = doc[block["page_number"] - 1]
-                bbox = block["bbox"]
-                m_text = block.get("myanmar_text", "")
-                if not m_text: continue
-                
-                original_font_size = block["font_size"]
-                
-                # Covers old text
-                page.draw_rect(bbox, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
-                
-                success = False
-                # Try 1: Original
-                # Try 2: 85%
-                # Try 3: 70%
-                for scale in [1.0, 0.85, 0.70]:
-                    fs = original_font_size * scale
-                    result = page.insert_textbox(
-                        bbox, m_text, fontsize=fs, fontname="pyidaungsu", fontfile=font_path,
-                        color=fitz.utils.getColor(block["color"]) if isinstance(block["color"], int) else (0,0,0),
-                        align=fitz.TEXT_ALIGN_LEFT
-                    )
-                    if result >= 0:
-                        success = True
-                        break
-                
-                # Try 4: Shorten text via Gemini
-                if not success and api_key:
-                    short_text = shorten_myanmar_text(m_text, api_key)
-                    result = page.insert_textbox(
-                        bbox, short_text, fontsize=original_font_size, fontname="pyidaungsu", fontfile=font_path,
-                        color=fitz.utils.getColor(block["color"]) if isinstance(block["color"], int) else (0,0,0),
-                        align=fitz.TEXT_ALIGN_LEFT
-                    )
-                    if result >= 0:
-                        success = True
-                        m_text = short_text # Update for logging
-                
-                # Try 5: Truncate
-                if not success:
-                    overflow_count += 1
-                    report.write(f"Page: {block['page_number']}, Block: {block['block_index']}\n")
-                    report.write(f"EN: {block['text']}\n")
-                    report.write(f"MM Attempt: {m_text}\n")
-                    report.write("-" * 10 + "\n")
-                    
-                    # Absolute fallback: insert whatever fits or truncate string
-                    # Since we don't know exactly what fits, we'll try binary-like truncation
-                    truncated = m_text
-                    while len(truncated) > 5 and page.insert_textbox(bbox, truncated + "...", fontsize=original_font_size * 0.7, fontname="pyidaungsu", fontfile=font_path) < 0:
-                        truncated = truncated[:-5]
-                    
-                    page.insert_textbox(
-                        bbox, truncated + "...", fontsize=original_font_size * 0.7, fontname="pyidaungsu", fontfile=font_path,
-                        color=fitz.utils.getColor(block["color"]) if isinstance(block["color"], int) else (0,0,0),
-                        align=fitz.TEXT_ALIGN_LEFT
-                    )
-                    
-        doc.save(output_path)
-        doc.close()
-        return overflow_count
-    except Exception as e:
-        print(f"Error writing PDF: {e}")
-        return 0
+# ---------------------------------------------------------------------------
+# [FIX #2 + #4] PDF writer — corrected color + font registration
+# ---------------------------------------------------------------------------
+
+def write_myanmar_pdf(
+    input_path: str,
+    output_path: str,
+    blocks: list,
+    font_path: str,
+    api_key: str = None,
+) -> dict:
+    """
+    Overlay Myanmar text onto original PDF, preserving all images and layout.
+
+    Fixes:
+      #2 — int_to_rgb() used instead of fitz.utils.getColor()
+      #4 — font registered at page level before insert_textbox
+    """
+    # [FIX #6] Font validation happens before we open the PDF
+    if not os.path.exists(font_path):
+        raise FileNotFoundError(
+            f"Font not found: {font_path}\n"
+            "Download Pyidaungsu from https://www.dayone.gov.mm/mm/fonts"
+        )
+
+    font_data = open(font_path, "rb").read()
+    doc = fitz.open(input_path)
+
+    overflow_count = 0
+    skipped_count = 0
+    report_lines = ["THIKHA TRANSLATE — OVERFLOW REPORT", "=" * 40, ""]
+
+    # Track which pages already have the font registered
+    registered_pages: set = set()
+
+    for block in blocks:
+        m_text = block.get("myanmar_text")
+        if not m_text:
+            skipped_count += 1
+            continue
+
+        page_idx = block["page_number"] - 1
+        page = doc[page_idx]
+        bbox = fitz.Rect(block["bbox"])
+        orig_fsize = max(block.get("font_size", 10), 6.0)
+
+        # [FIX #4] Register font once per page before using it
+        if page_idx not in registered_pages:
+            page.insert_font(fontname="thikha_myanmar", fontbuffer=font_data)
+            registered_pages.add(page_idx)
+
+        # Erase original text with a white rectangle
+        page.draw_rect(bbox, color=(1, 1, 1), fill=(1, 1, 1), overlay=True)
+
+        # [FIX #2] Correct color conversion
+        text_color = int_to_rgb(block.get("color", 0))
+
+        inserted = False
+
+        # Attempt 1: original size → 85% → 70%
+        for scale in (1.0, 0.85, 0.70):
+            result = page.insert_textbox(
+                bbox,
+                m_text,
+                fontname="thikha_myanmar",
+                fontsize=orig_fsize * scale,
+                color=text_color,
+                align=fitz.TEXT_ALIGN_LEFT,
+            )
+            if result >= 0:
+                inserted = True
+                break
+
+        # Attempt 2: ask Gemini to shorten the text
+        if not inserted and api_key:
+            shorter = shorten_myanmar_text(m_text, api_key)
+            result = page.insert_textbox(
+                bbox,
+                shorter,
+                fontname="thikha_myanmar",
+                fontsize=orig_fsize,
+                color=text_color,
+                align=fitz.TEXT_ALIGN_LEFT,
+            )
+            if result >= 0:
+                inserted = True
+                m_text = shorter
+
+        # Attempt 3: progressive truncation
+        if not inserted:
+            overflow_count += 1
+            report_lines += [
+                f"Page {block['page_number']} | Block {block['block_index']}",
+                f"  EN : {block['text'][:120]}",
+                f"  MM : {m_text[:120]}",
+                "-" * 30,
+            ]
+            truncated = m_text
+            while len(truncated) > 5:
+                truncated = truncated[:-5]
+                result = page.insert_textbox(
+                    bbox,
+                    truncated + "…",
+                    fontname="thikha_myanmar",
+                    fontsize=orig_fsize * 0.70,
+                    color=text_color,
+                    align=fitz.TEXT_ALIGN_LEFT,
+                )
+                if result >= 0:
+                    break
+
+    doc.save(output_path, garbage=4, deflate=True)
+    doc.close()
+
+    if overflow_count:
+        with open("overflow_report.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(report_lines))
+
+    return {
+        "overflow_count": overflow_count,
+        "skipped_count": skipped_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="PDF Layout-Preserving Myanmar Translator")
-    parser.add_argument("--input", required=True, help="Input PDF path")
-    parser.add_argument("--output", help="Output PDF path")
-    parser.add_argument("--api-key", help="Gemini API Key")
-    parser.add_argument("--font", required=True, help="Path to Pyidaungsu.ttf")
-    parser.add_argument("--domain", default="auto", choices=["auto", "medical", "tech", "academic", "legal", "general"])
-    parser.add_argument("--pages", default="all", help="Page range (e.g., 1-5 or all)")
-    
+    parser = argparse.ArgumentParser(description="ThiKha — Layout-Preserving Myanmar PDF Translator")
+    parser.add_argument("--input",   required=True,  help="Input PDF path")
+    parser.add_argument("--output",  default=None,   help="Output PDF path (default: input_myanmar.pdf)")
+    parser.add_argument("--api-key", default=None,   help="Gemini API key (or set GEMINI_API_KEY env var)")
+    parser.add_argument("--font",    required=True,  help="Path to Pyidaungsu.ttf")
+    parser.add_argument("--domain",  default="auto",
+                        choices=["auto", "medical", "tech", "academic", "legal", "general"])
+    parser.add_argument("--pages",   default="all",  help="Page range: 'all' or '1-5'")
     args = parser.parse_args()
-    
+
     api_key = args.api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        print("Error: Gemini API Key is required (via --api-key or GEMINI_API_KEY env var).")
-        return
+        print("ERROR: Gemini API key required (--api-key or GEMINI_API_KEY env var)")
+        sys.exit(1)
 
+    # [FIX #6] Validate font early — fail fast with clear message
     if not os.path.exists(args.font):
-        print(f"Error: Font file not found at {args.font}")
-        return
+        print(f"ERROR: Font file not found: {args.font}")
+        print("Download Pyidaungsu from https://www.dayone.gov.mm/mm/fonts")
+        sys.exit(1)
 
-    start_time = time.time()
-    output_path = args.output or f"{os.path.splitext(args.input)[0]}_myanmar.pdf"
+    if not os.path.exists(args.input):
+        print(f"ERROR: Input file not found: {args.input}")
+        sys.exit(1)
 
-    # Step 1: EXTRACT
-    print("Step 1: [EXTRACT] Scanning PDF structure...")
-    blocks, processed_pages = extract_pdf_blocks(args.input, args.pages, api_key)
-    print(f"Found {len(blocks)} text blocks across {processed_pages} pages.")
+    output_path = args.output or os.path.splitext(args.input)[0] + "_myanmar.pdf"
+    start = time.time()
 
-    # Step 2: DETECT
+    # Step 1: Extract
+    print("\nStep 1: [EXTRACT] Scanning PDF structure...")
+    # [FIX #3] Unpack consistent 3-tuple
+    blocks, processed_pages, total_blocks = extract_pdf_blocks(args.input, args.pages, api_key)
+    print(f"         Found {total_blocks} text blocks across {processed_pages} pages.")
+
+    if not blocks:
+        print("ERROR: No text blocks found. Is the PDF password-protected or image-only?")
+        sys.exit(1)
+
+    # Step 2: Domain detection
     domain = args.domain
     if domain == "auto":
-        print("Step 2: [DETECT] Analyzing document domain...")
+        print("Step 2: [DETECT]  Detecting document domain...")
         domain = detect_domain(args.input, api_key)
-    else:
-        print(f"Step 2: [DETECT] Domain set to: {domain}")
-    print(f"Target Domain: {domain}")
+    print(f"         Domain: {domain}")
 
-    # Step 3: TRANSLATE
-    print(f"Step 3: [TRANSLATE] Translating {len(blocks)} blocks via Gemini...")
-    pbar = tqdm(total=len(blocks), unit="block")
-    for batch_done in translate_blocks(blocks, api_key, domain):
-        pbar.update(batch_done)
+    # Step 3: Translate
+    print(f"Step 3: [TRANSLATE] Translating {len(blocks)} blocks via Gemini 1.5 Pro...")
+    pbar = tqdm(total=len(blocks), unit="block", file=sys.stderr)
+    for done in translate_blocks(blocks, api_key, domain):
+        pbar.update(done)
     pbar.close()
 
-    # Step 4: WRITE
-    print("Step 4: [WRITE] Building Myanmar PDF...")
-    overflows = write_myanmar_pdf(args.input, output_path, blocks, args.font, api_key)
+    translated = sum(1 for b in blocks if b.get("myanmar_text"))
+    print(f"         Translated: {translated}/{len(blocks)} blocks")
 
-    # Step 5: VERIFY
-    print("Step 5: [VERIFY] Verifying output...")
-    if os.path.exists(output_path):
-        duration = str(timedelta(seconds=int(time.time() - start_time)))
-        in_size = os.path.getsize(args.input) / 1024
-        out_size = os.path.getsize(output_path) / 1024
-        
-        print("\n" + "="*40)
-        print("SUCCESS: Myanmar PDF saved!")
-        print(f"Path: {output_path}")
-        print("-" * 40)
-        print(f"Total Time:      {duration}")
-        print(f"Pages:           {processed_pages}")
-        print(f"Blocks:          {len(blocks)}")
-        print(f"Overflow Alerts: {overflows}")
-        print(f"Input Size:      {in_size:.2f} KB")
-        print(f"Output Size:     {out_size:.2f} KB")
-        print("="*40)
-    else:
-        print("Error: Output file was not generated.")
+    # Step 4: Write PDF
+    print("Step 4: [WRITE]   Building Myanmar PDF...")
+    report = write_myanmar_pdf(args.input, output_path, blocks, args.font, api_key)
+
+    # Step 5: Verify
+    print("Step 5: [VERIFY]  Verifying output...")
+    elapsed = str(timedelta(seconds=int(time.time() - start)))
+    in_kb  = os.path.getsize(args.input) / 1024
+    out_kb = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
+
+    print()
+    print("=" * 44)
+    print("  SUCCESS — ThiKha Translate complete!")
+    print("=" * 44)
+    print(f"  Output      : {output_path}")
+    print(f"  Time        : {elapsed}")
+    print(f"  Pages       : {processed_pages}")
+    print(f"  Blocks      : {len(blocks)} total / {translated} translated")
+    print(f"  Overflow    : {report['overflow_count']} blocks")
+    print(f"  Skipped     : {report['skipped_count']} blocks (no translation)")
+    print(f"  Input size  : {in_kb:.1f} KB")
+    print(f"  Output size : {out_kb:.1f} KB")
+    print("=" * 44)
+
+    if report["overflow_count"]:
+        print(f"\n  See overflow_report.txt for {report['overflow_count']} truncated blocks.")
+
 
 if __name__ == "__main__":
     main()

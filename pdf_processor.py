@@ -6,56 +6,41 @@ import time
 import random
 
 def install(package):
-    # Writable directory is mandatory in cloud run environments
     lib_dir = "/tmp/python_libs"
     if not os.path.exists(lib_dir):
         os.makedirs(lib_dir)
     
-    # Ensure it's at the front of the path
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
 
     print(f"Attempting to install {package} to {lib_dir}...", file=sys.stderr)
     
-    # Try 1: Standard pip install
     try:
-        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages", "--no-cache-dir", "--only-binary=:all:"]
-        print(f"Trying: {' '.join(cmd)}", file=sys.stderr)
+        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages", "--no-cache-dir"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             print(f"Successfully installed {package}", file=sys.stderr)
-            return
+            return True
         print(f"Pip install failed: {result.stderr}", file=sys.stderr)
     except Exception as e:
         print(f"Error during pip install: {e}", file=sys.stderr)
 
-    # Try 2: If pip is missing, try ensurepip
     try:
-        print("Trying ensurepip...", file=sys.stderr)
-        subprocess.run([sys.executable, "-m", "ensurepip", "--default-pip"], capture_output=True)
-        # Try install again
+        print("Trying ensurepip / get-pip fallback...", file=sys.stderr)
+        get_pip_path = "/tmp/get-pip.py"
+        if not os.path.exists(get_pip_path):
+            subprocess.run(["curl", "-s", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip_path], check=True)
+        
+        subprocess.run([sys.executable, get_pip_path, "--user", "--break-system-packages"], capture_output=True)
         cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
-            return
-    except:
-        pass
-
-    # Try 3: get-pip.py fallback
-    try:
-        print("Trying get-pip.py fallback...", file=sys.stderr)
-        get_pip_path = "/tmp/get-pip.py"
-        if not os.path.exists(get_pip_path):
-            subprocess.run(["curl", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip_path], check=True)
-        
-        # Install pip first
-        subprocess.run([sys.executable, get_pip_path, "--user", "--break-system-packages"], capture_output=True)
-        
-        # Then try installing package using the newly installed pip (if possible) or just try again
-        subprocess.run([sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages"], check=True)
-        print(f"Successfully bootstrapped {package}", file=sys.stderr)
+            print(f"Successfully bootstrapped {package}", file=sys.stderr)
+            return True
     except Exception as e:
         print(f"All install attempts failed for {package}: {e}", file=sys.stderr)
+        
+    return False
 
 try:
     import fitz
@@ -85,10 +70,16 @@ except ImportError:
     from tqdm import tqdm
 
 try:
-    from myanmar_tools import ZawgyiDetector, ZawgyiConverter
+    from myanmar_tools import ZawgyiDetector
 except ImportError:
     install("myanmar-tools")
-    from myanmar_tools import ZawgyiDetector, ZawgyiConverter
+    from myanmar_tools import ZawgyiDetector
+
+try:
+    from rabbit import zg2uni
+except ImportError:
+    install("rabbit-myanmar")
+    from rabbit import zg2uni
 
 def is_valid_unicode_myanmar(text):
     if not text: return False
@@ -96,7 +87,6 @@ def is_valid_unicode_myanmar(text):
     return len(myanmar_chars) > 0
 
 detector = ZawgyiDetector()
-converter = ZawgyiConverter()
 
 def get_page_dimensions(pdf_path):
     """Returns [(page_num, width, height)] for each page."""
@@ -329,9 +319,12 @@ Texts to translate:
                     for idx_in_batch, translation in enumerate(translations):
                         # Zawgyi detection and conversion
                         if translation:
-                            score = detector.get_zawgyi_probability(translation)
-                            if score > 0.5:
-                                translation = converter.convert(translation, "unicode")
+                            try:
+                                score = detector.get_zawgyi_probability(translation)
+                                if score > 0.5:
+                                    translation = zg2uni(translation)
+                            except Exception:
+                                pass
                             
                             # Final validation - if no myanmar chars at all, something is wrong
                             if not is_valid_unicode_myanmar(translation) and any('\u1000' <= c <= '\u109F' for c in translation) == False:
@@ -363,18 +356,19 @@ Texts to translate:
     return blocks
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 pdf_processor.py <pdf_path> [api_key] [domain] [translate_flag]")
-        sys.exit(1)
-        
-    pdf_file = sys.argv[1]
-    api_key = sys.argv[2] if len(sys.argv) > 2 else "NONE"
-    domain = sys.argv[3] if len(sys.argv) > 3 else "auto"
-    should_translate = sys.argv[4].lower() == "true" if len(sys.argv) > 4 else False
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("pdf_path", help="Path to PDF file")
+    parser.add_argument("domain", nargs="?", default="auto", help="Domain for translation")
+    parser.add_argument("translate_flag", nargs="?", default="false", help="Should translate")
+    args = parser.parse_args()
     
-    if api_key == "NONE":
-        api_key = None
-        
+    pdf_file = args.pdf_path
+    domain = args.domain
+    should_translate = args.translate_flag.lower() == "true"
+    
+    api_key = os.getenv("GEMINI_API_KEY")
+    
     if not os.path.exists(pdf_file):
         print(f"File not found: {pdf_file}")
         sys.exit(1)
