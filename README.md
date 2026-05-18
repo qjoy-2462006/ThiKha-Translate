@@ -20,6 +20,8 @@ View your app in AI Studio: https://ai.studio/apps/612b9d0a-e720-4fba-a015-5d028
    - Optionally set `GEMINI_API_KEY` in `.env.local` (loaded automatically by the server).
 4. **Run:** `npm run dev` → open [http://localhost:3000](http://localhost:3000)
 
+**If localhost “stops working” after many tries:** use project root as cwd, ensure `python` or `py -3` works in the same terminal, or set `PYTHON_BIN` (see `.env.example`). Rate limiting is **off in development** (`NODE_ENV` not `production`).
+
 **Python-only UI (Gradio):** `pip install -r requirements.txt` then `python app.py` → [http://127.0.0.1:7860](http://127.0.0.1:7860). Public `gradio.live` links are off by default; set `THIKHA_GRADIO_SHARE=true` to enable sharing.
 
 ## Docker (single image — recommended)

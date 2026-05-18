@@ -9,7 +9,7 @@ import express, { Request, Response } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import multer from "multer";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, spawnSync, ChildProcess } from "child_process";
 import fs from "fs";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -20,12 +20,82 @@ const PYTHON_TIMEOUT_MS = 30 * 60 * 1000;
 const API_KEY_HEADER = "x-gemini-api-key";
 
 // ---------------------------------------------------------------------------
-// Python executable (Windows: python, Unix: python3)
+// Python executable (Windows: python → py -3 fallback; Unix: python3)
 // ---------------------------------------------------------------------------
 
-function getPythonBin(): string {
-  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
-  return process.platform === "win32" ? "python" : "python3";
+interface PythonCmd {
+  exe: string;
+  argsPrefix: string[];
+}
+
+let pythonResolved: PythonCmd | null = null;
+
+/** Resolve once — supports PYTHON_BIN="py -3" or full path to python.exe (with spaces). */
+function resolvePythonCmd(): PythonCmd {
+  if (pythonResolved) return pythonResolved;
+
+  const raw = process.env.PYTHON_BIN?.trim();
+  if (raw) {
+    const lower = raw.toLowerCase();
+    if (lower.startsWith("py ") || lower === "py") {
+      const parts = raw.split(/\s+/);
+      const rest = parts.slice(1);
+      pythonResolved = { exe: "py", argsPrefix: rest.length ? rest : ["-3"] };
+      return pythonResolved;
+    }
+    if (
+      raw.includes(" ") &&
+      (lower.endsWith("python.exe") || lower.endsWith("python3.exe"))
+    ) {
+      pythonResolved = { exe: raw, argsPrefix: [] };
+      return pythonResolved;
+    }
+    const parts = raw.split(/\s+/);
+    pythonResolved = { exe: parts[0]!, argsPrefix: parts.slice(1) };
+    return pythonResolved;
+  }
+
+  if (process.platform === "win32") {
+    const ok = (cmd: string, args: string[]) =>
+      spawnSync(cmd, args, { stdio: "ignore" }).status === 0;
+    if (ok("python", ["--version"])) {
+      pythonResolved = { exe: "python", argsPrefix: [] };
+      return pythonResolved;
+    }
+    if (ok("py", ["-3", "--version"])) {
+      pythonResolved = { exe: "py", argsPrefix: ["-3"] };
+      return pythonResolved;
+    }
+    pythonResolved = { exe: "python", argsPrefix: [] };
+    return pythonResolved;
+  }
+
+  pythonResolved = { exe: "python3", argsPrefix: [] };
+  return pythonResolved;
+}
+
+function pythonDisplayString(): string {
+  const { exe, argsPrefix } = resolvePythonCmd();
+  return [exe, ...argsPrefix].join(" ");
+}
+
+// ---------------------------------------------------------------------------
+// Myanmar font (repo may use Pyidaungsu.ttf or pyidaungsu.ttf)
+// ---------------------------------------------------------------------------
+
+function resolveFontPath(): string {
+  if (process.env.MYANMAR_FONT_PATH?.trim()) {
+    return process.env.MYANMAR_FONT_PATH.trim();
+  }
+  const root = process.cwd();
+  const candidates = [
+    path.join(root, "Pyidaungsu.ttf"),
+    path.join(root, "pyidaungsu.ttf"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return candidates[0]!;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +171,8 @@ function runPython(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, ...extraEnv };
-    const proc: ChildProcess = spawn(getPythonBin(), [scriptPath, ...args], { env });
+    const { exe, argsPrefix } = resolvePythonCmd();
+    const proc: ChildProcess = spawn(exe, [...argsPrefix, scriptPath, ...args], { env });
 
     let stdout = "";
     let stderr = "";
@@ -182,10 +253,13 @@ async function startServer() {
     standardHeaders: true,
     legacyHeaders: false,
     skip: (req) => {
-      if (req.method === "GET" && req.path === "/api/health") return true;
-      if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/(progress|meta|download)$/.test(req.path))
+      // Dev: do not throttle (mounted /api/ makes req.path unreliable here).
+      if (process.env.NODE_ENV !== "production") return true;
+      const url = (req.originalUrl ?? req.url ?? "").split("?")[0];
+      if (req.method === "GET" && url === "/api/health") return true;
+      if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/(progress|meta|download)$/.test(url))
         return true;
-      if (req.method === "POST" && req.path === "/api/inspect") return true;
+      if (req.method === "POST" && url === "/api/inspect") return true;
       return false;
     },
   });
@@ -203,10 +277,16 @@ async function startServer() {
     limits: { fileSize: 100 * 1024 * 1024 },
   });
 
-  const PYTHON_EXTRACT = path.join(process.cwd(), "pdf_processor.py");
-  const PYTHON_TRANSLATE = path.join(process.cwd(), "translate_pdf.py");
-  const FONT_PATH =
-    process.env.MYANMAR_FONT_PATH ?? path.join(process.cwd(), "Pyidaungsu.ttf");
+  const cwd = process.cwd();
+  const PYTHON_EXTRACT = path.join(cwd, "pdf_processor.py");
+  const PYTHON_TRANSLATE = path.join(cwd, "translate_pdf.py");
+  const FONT_PATH = resolveFontPath();
+
+  if (!fs.existsSync(PYTHON_EXTRACT)) {
+    console.error(
+      `[startup] pdf_processor.py not found at ${PYTHON_EXTRACT}. Run the server from the project root (current cwd: ${cwd}).`
+    );
+  }
 
   // -------------------------------------------------------------------------
   // GET /api/health
@@ -216,7 +296,7 @@ async function startServer() {
       status: "ok",
       font_exists: fs.existsSync(FONT_PATH),
       font_path: FONT_PATH,
-      python: getPythonBin(),
+      python: pythonDisplayString(),
       api_key_from_env: Boolean(process.env.GEMINI_API_KEY),
     });
   });
@@ -556,7 +636,7 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`\nThiKha Translate → http://localhost:${PORT}`);
-    console.log(`Python    : ${getPythonBin()}`);
+    console.log(`Python    : ${pythonDisplayString()}`);
     console.log(`Font      : ${FONT_PATH} (exists: ${fs.existsSync(FONT_PATH)})`);
     console.log(
       `API key   : UI header "${API_KEY_HEADER}" or optional GEMINI_API_KEY in .env.local\n`
