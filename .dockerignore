@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.cursor
+*.log
+.env
+.env.*
+!.env.example
+*.msi
+**/.DS_Store
+coverage
+agent-transcripts

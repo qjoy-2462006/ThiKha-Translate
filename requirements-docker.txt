@@ -1,0 +1,6 @@
+# Python deps for the Node API only (no Gradio) — used by Dockerfile
+pymupdf>=1.24.0
+google-generativeai>=0.8.0
+tqdm>=4.66.0
+myanmar-tools>=0.1.1
+rabbit-myanmar>=0.0.3

@@ -1,0 +1,25 @@
+# ThiKha Translate — one service, one way to run in Docker
+#
+# Usage:
+#   cp .env.example .env
+#   # Edit .env — set GEMINI_API_KEY (optional if users paste key in UI)
+#   docker compose up --build
+#
+# Open: http://localhost:3000
+
+services:
+  thikha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thikha-translate:latest
+    container_name: thikha-translate
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      # Optional: pre-fill server-side key; UI header still works if empty
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Font override if you mount a different path
+      MYANMAR_FONT_PATH: ${MYANMAR_FONT_PATH:-/app/Pyidaungsu.ttf}
+    restart: unless-stopped
