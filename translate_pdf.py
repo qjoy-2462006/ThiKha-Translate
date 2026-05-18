@@ -21,6 +21,8 @@ import time
 import random
 import argparse
 import tempfile
+import shutil
+import urllib.request
 from datetime import timedelta
 
 
@@ -50,35 +52,63 @@ def emit_progress(
 # ---------------------------------------------------------------------------
 
 def install(package):
+    """Best-effort pip install into a temp --target dir (Windows + Linux)."""
     lib_dir = os.path.join(tempfile.gettempdir(), "thikha_python_libs")
     os.makedirs(lib_dir, exist_ok=True)
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
-    try:
+
+    def pip_cmd():
         cmd = [
-            sys.executable, "-m", "pip", "install", package,
-            "--target", lib_dir,
-            "--break-system-packages",
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            package,
+            "--target",
+            lib_dir,
+            "--upgrade",
             "--no-cache-dir",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        if sys.platform != "win32":
+            cmd.append("--break-system-packages")
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    result = pip_cmd()
+    if result.returncode == 0:
+        print(f"[install] {package} OK", file=sys.stderr)
+        return True
+
+    err = (result.stderr or "") + (result.stdout or "")
+    if sys.platform == "win32" and ("183" in err or "already exists" in err.lower()):
+        try:
+            shutil.rmtree(lib_dir, ignore_errors=True)
+            os.makedirs(lib_dir, exist_ok=True)
+        except OSError:
+            pass
+        result = pip_cmd()
         if result.returncode == 0:
-            print(f"[install] {package} OK", file=sys.stderr)
+            print(f"[install] {package} OK (after cache reset)", file=sys.stderr)
             return True
-        print(f"[install] {package} pip failed: {result.stderr[:200]}", file=sys.stderr)
-        
-        # fallback to get-pip
-        get_pip = "/tmp/get-pip.py"
-        if not os.path.exists(get_pip):
-            subprocess.run(["curl", "-s", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip], check=True)
-        subprocess.run([sys.executable, get_pip, "--user", "--break-system-packages"], capture_output=True)
-        result2 = subprocess.run(cmd, capture_output=True, text=True)
-        if result2.returncode == 0:
+
+    print(f"[install] {package} pip failed: {result.stderr[:400]}", file=sys.stderr)
+
+    try:
+        get_pip = os.path.join(tempfile.gettempdir(), "get-pip-thikha.py")
+        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip)
+        subprocess.run([sys.executable, get_pip, "--user"], capture_output=True, text=True)
+        result = pip_cmd()
+        if result.returncode == 0:
+            print(f"[install] {package} OK (after get-pip)", file=sys.stderr)
             return True
-            
     except Exception as e:
         print(f"[install] exception: {e}", file=sys.stderr)
     return False
+
+
+class _NoZawgyiDetector:
+    def get_zawgyi_probability(self, _text: str) -> float:
+        return 0.0
 
 
 try:
@@ -101,9 +131,28 @@ except ImportError:
 
 try:
     from myanmar_tools import ZawgyiDetector
+
+    detector = ZawgyiDetector()
 except ImportError:
-    install("myanmar-tools")
-    from myanmar_tools import ZawgyiDetector
+    if install("myanmar-tools"):
+        try:
+            from myanmar_tools import ZawgyiDetector
+
+            detector = ZawgyiDetector()
+        except ImportError:
+            print(
+                "[thikha] myanmar-tools still unavailable — Zawgyi detection off. "
+                "Run: pip install myanmar-tools",
+                file=sys.stderr,
+            )
+            detector = _NoZawgyiDetector()
+    else:
+        print(
+            "[thikha] myanmar-tools install failed — Zawgyi detection off. "
+            "Run: pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        detector = _NoZawgyiDetector()
 
 # [FIX #1] rabbit-myanmar replaces ZawgyiConverter (which does not exist in Python)
 try:
@@ -116,9 +165,6 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-detector = ZawgyiDetector()
-
 
 def zawgyi_to_unicode(text: str) -> str:
     """Detect Zawgyi and convert to Unicode if needed."""

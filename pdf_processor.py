@@ -5,43 +5,73 @@ import json
 import time
 import random
 import tempfile
+import shutil
+import urllib.request
+
 
 def install(package):
+    """Best-effort pip install into a temp --target dir (Windows + Linux)."""
     lib_dir = os.path.join(tempfile.gettempdir(), "thikha_python_libs")
-    if not os.path.exists(lib_dir):
-        os.makedirs(lib_dir)
-    
+    os.makedirs(lib_dir, exist_ok=True)
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
 
+    def pip_cmd():
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            package,
+            "--target",
+            lib_dir,
+            "--upgrade",
+            "--no-cache-dir",
+        ]
+        if sys.platform != "win32":
+            cmd.append("--break-system-packages")
+        return subprocess.run(cmd, capture_output=True, text=True)
+
     print(f"Attempting to install {package} to {lib_dir}...", file=sys.stderr)
-    
-    try:
-        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages", "--no-cache-dir"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+    result = pip_cmd()
+    if result.returncode == 0:
+        print(f"Successfully installed {package}", file=sys.stderr)
+        return True
+
+    err = (result.stderr or "") + (result.stdout or "")
+    if sys.platform == "win32" and ("183" in err or "already exists" in err.lower()):
+        try:
+            shutil.rmtree(lib_dir, ignore_errors=True)
+            os.makedirs(lib_dir, exist_ok=True)
+        except OSError:
+            pass
+        result = pip_cmd()
         if result.returncode == 0:
-            print(f"Successfully installed {package}", file=sys.stderr)
+            print(f"Successfully installed {package} (after cache reset)", file=sys.stderr)
             return True
-        print(f"Pip install failed: {result.stderr}", file=sys.stderr)
-    except Exception as e:
-        print(f"Error during pip install: {e}", file=sys.stderr)
+
+    print(f"Pip install failed: {result.stderr}", file=sys.stderr)
 
     try:
-        print("Trying ensurepip / get-pip fallback...", file=sys.stderr)
-        get_pip_path = "/tmp/get-pip.py"
-        if not os.path.exists(get_pip_path):
-            subprocess.run(["curl", "-s", "https://bootstrap.pypa.io/get-pip.py", "-o", get_pip_path], check=True)
-        
-        subprocess.run([sys.executable, get_pip_path, "--user", "--break-system-packages"], capture_output=True)
-        cmd = [sys.executable, "-m", "pip", "install", package, "--target", lib_dir, "--break-system-packages"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        print("Trying get-pip bootstrap (urllib, no curl)...", file=sys.stderr)
+        get_pip_path = os.path.join(tempfile.gettempdir(), "get-pip-thikha.py")
+        urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip_path)
+        subprocess.run([sys.executable, get_pip_path, "--user"], capture_output=True, text=True)
+        result = pip_cmd()
         if result.returncode == 0:
             print(f"Successfully bootstrapped {package}", file=sys.stderr)
             return True
     except Exception as e:
-        print(f"All install attempts failed for {package}: {e}", file=sys.stderr)
-        
+        print(f"get-pip fallback failed: {e}", file=sys.stderr)
+
     return False
+
+
+class _NoZawgyiDetector:
+    """Fallback when myanmar-tools cannot be installed (e.g. exotic Python)."""
+
+    def get_zawgyi_probability(self, _text: str) -> float:
+        return 0.0
 
 try:
     import fitz
@@ -72,9 +102,28 @@ except ImportError:
 
 try:
     from myanmar_tools import ZawgyiDetector
+
+    detector = ZawgyiDetector()
 except ImportError:
-    install("myanmar-tools")
-    from myanmar_tools import ZawgyiDetector
+    if install("myanmar-tools"):
+        try:
+            from myanmar_tools import ZawgyiDetector
+
+            detector = ZawgyiDetector()
+        except ImportError:
+            print(
+                "[thikha] myanmar-tools still unavailable — Zawgyi detection off. "
+                "Run: pip install myanmar-tools",
+                file=sys.stderr,
+            )
+            detector = _NoZawgyiDetector()
+    else:
+        print(
+            "[thikha] myanmar-tools install failed — Zawgyi detection off. "
+            "Run: pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        detector = _NoZawgyiDetector()
 
 try:
     from rabbit import zg2uni
@@ -86,8 +135,6 @@ def is_valid_unicode_myanmar(text):
     if not text: return False
     myanmar_chars = [c for c in text if '\u1000' <= c <= '\u109F']
     return len(myanmar_chars) > 0
-
-detector = ZawgyiDetector()
 
 def get_page_dimensions(pdf_path):
     """Returns [(page_num, width, height)] for each page."""
