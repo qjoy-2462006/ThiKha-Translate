@@ -4,9 +4,10 @@ import os
 import json
 import time
 import random
+import tempfile
 
 def install(package):
-    lib_dir = "/tmp/python_libs"
+    lib_dir = os.path.join(tempfile.gettempdir(), "thikha_python_libs")
     if not os.path.exists(lib_dir):
         os.makedirs(lib_dir)
     
@@ -356,13 +357,28 @@ Texts to translate:
     return blocks
 
 if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "--inspect":
+        inspect_path = sys.argv[2]
+        if not os.path.exists(inspect_path):
+            print(json.dumps({"error": f"File not found: {inspect_path}"}))
+            sys.exit(1)
+        try:
+            doc = fitz.open(inspect_path)
+            pages = len(doc)
+            doc.close()
+            print(json.dumps({"pages": pages, "size_bytes": os.path.getsize(inspect_path)}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        sys.exit(0)
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf_path", help="Path to PDF file")
     parser.add_argument("domain", nargs="?", default="auto", help="Domain for translation")
     parser.add_argument("translate_flag", nargs="?", default="false", help="Should translate")
     args = parser.parse_args()
-    
+
     pdf_file = args.pdf_path
     domain = args.domain
     should_translate = args.translate_flag.lower() == "true"

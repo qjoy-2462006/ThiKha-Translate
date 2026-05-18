@@ -20,7 +20,29 @@ import json
 import time
 import random
 import argparse
+import tempfile
 from datetime import timedelta
+
+
+PROGRESS_PREFIX = "@@PROGRESS@@"
+
+
+def emit_progress(
+    step: str,
+    done: int = 0,
+    total: int = 0,
+    message: str = "",
+    **extra,
+):
+    """Machine-readable progress for Node SSE (stderr, flushed)."""
+    payload = {
+        "step": step,
+        "done": done,
+        "total": total,
+        "message": message,
+        **extra,
+    }
+    print(f"{PROGRESS_PREFIX}{json.dumps(payload, ensure_ascii=False)}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +50,7 @@ from datetime import timedelta
 # ---------------------------------------------------------------------------
 
 def install(package):
-    lib_dir = "/tmp/python_libs"
+    lib_dir = os.path.join(tempfile.gettempdir(), "thikha_python_libs")
     os.makedirs(lib_dir, exist_ok=True)
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
@@ -539,11 +561,22 @@ def main():
     output_path = args.output or os.path.splitext(args.input)[0] + "_myanmar.pdf"
     start = time.time()
 
+    total_blocks = 0
+    processed_pages = 0
+
     # Step 1: Extract
     print("\nStep 1: [EXTRACT] Scanning PDF structure...")
-    # [FIX #3] Unpack consistent 3-tuple
+    emit_progress("extract", 0, 100, "Scanning PDF structure…")
     blocks, processed_pages, total_blocks = extract_pdf_blocks(args.input, args.pages, api_key)
     print(f"         Found {total_blocks} text blocks across {processed_pages} pages.")
+    emit_progress(
+        "extract",
+        total_blocks,
+        total_blocks,
+        f"Found {total_blocks} blocks across {processed_pages} pages",
+        pages=processed_pages,
+        block_count=total_blocks,
+    )
 
     if not blocks:
         print("ERROR: No text blocks found. Is the PDF password-protected or image-only?")
@@ -553,14 +586,26 @@ def main():
     domain = args.domain
     if domain == "auto":
         print("Step 2: [DETECT]  Detecting document domain...")
+        emit_progress("detect", 0, 1, "Detecting document domain…")
         domain = detect_domain(args.input, api_key)
     print(f"         Domain: {domain}")
+    emit_progress("detect", 1, 1, f"Domain: {domain}", domain=domain)
 
     # Step 3: Translate
-    print(f"Step 3: [TRANSLATE] Translating {len(blocks)} blocks via Gemini 1.5 Pro...")
-    pbar = tqdm(total=len(blocks), unit="block", file=sys.stderr)
-    for done in translate_blocks(blocks, api_key, domain):
-        pbar.update(done)
+    n_blocks = len(blocks)
+    print(f"Step 3: [TRANSLATE] Translating {n_blocks} blocks via Gemini 1.5 Pro...")
+    emit_progress("translate", 0, n_blocks, f"Translating 0/{n_blocks} blocks…")
+    pbar = tqdm(total=n_blocks, unit="block", file=sys.stderr)
+    translated_so_far = 0
+    for batch_done in translate_blocks(blocks, api_key, domain):
+        translated_so_far += batch_done
+        pbar.update(batch_done)
+        emit_progress(
+            "translate",
+            translated_so_far,
+            n_blocks,
+            f"Translating {translated_so_far}/{n_blocks} blocks…",
+        )
     pbar.close()
 
     translated = sum(1 for b in blocks if b.get("myanmar_text"))
@@ -568,10 +613,13 @@ def main():
 
     # Step 4: Write PDF
     print("Step 4: [WRITE]   Building Myanmar PDF...")
+    emit_progress("write", 0, 1, "Building Myanmar PDF…")
     report = write_myanmar_pdf(args.input, output_path, blocks, args.font, api_key)
+    emit_progress("write", 1, 1, "PDF built")
 
     # Step 5: Verify
-    print("Step 5: [VERIFY]  Verifying output...")
+    print("Step 5: [VERIFY]  Verifying output…")
+    emit_progress("verify", 0, 1, "Verifying output…")
     elapsed = str(timedelta(seconds=int(time.time() - start)))
     in_kb  = os.path.getsize(args.input) / 1024
     out_kb = os.path.getsize(output_path) / 1024 if os.path.exists(output_path) else 0
@@ -592,6 +640,68 @@ def main():
 
     if report["overflow_count"]:
         print(f"\n  See overflow_report.txt for {report['overflow_count']} truncated blocks.")
+
+    meta_path = output_path + ".meta.json"
+    export_blocks = [
+        {
+            "page_number": b.get("page_number"),
+            "block_index": b.get("block_index"),
+            "bbox": b.get("bbox"),
+            "text": b.get("text", ""),
+            "myanmar_text": b.get("myanmar_text"),
+            "font_size": b.get("font_size", 12),
+            "font_name": b.get("font_name", ""),
+            "block_type": b.get("block_type", 0),
+            "is_bold": b.get("is_bold", False),
+            "color": b.get("color", 0),
+        }
+        for b in blocks
+    ]
+
+    dimensions = []
+    try:
+        doc = fitz.open(args.input)
+        for i, page in enumerate(doc):
+            dimensions.append({
+                "page_number": i + 1,
+                "width": page.rect.width,
+                "height": page.rect.height,
+            })
+        doc.close()
+    except Exception as e:
+        print(f"[meta] dimensions: {e}", file=sys.stderr)
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "dimensions": dimensions,
+                "blocks": export_blocks,
+                "summary": {
+                    "total_pages": processed_pages,
+                    "total_text_blocks": len(blocks),
+                    "translated_blocks": translated,
+                    "overflow_count": report.get("overflow_count", 0),
+                    "skipped_count": report.get("skipped_count", 0),
+                    "domain": domain,
+                    "elapsed_seconds": int(time.time() - start),
+                },
+            },
+            f,
+            ensure_ascii=False,
+        )
+
+    emit_progress(
+        "complete",
+        n_blocks,
+        n_blocks,
+        "Translation complete",
+        output_path=output_path,
+        meta_path=meta_path,
+        domain=domain,
+        overflow_count=report.get("overflow_count", 0),
+        translated_blocks=translated,
+        total_pages=processed_pages,
+    )
 
 
 if __name__ == "__main__":

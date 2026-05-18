@@ -8,7 +8,7 @@ from pathlib import Path
 
 # --- Dependency Management ---
 def install(package):
-    lib_dir = "/tmp/python_libs"
+    lib_dir = os.path.join(tempfile.gettempdir(), "thikha_python_libs")
     if not os.path.exists(lib_dir):
         os.makedirs(lib_dir)
     if lib_dir not in sys.path:
@@ -175,4 +175,8 @@ def create_ui():
 if __name__ == "__main__":
     demo = create_ui()
     # share=True creates a public gradio.live URL
-    demo.launch(share=True)
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        share=os.getenv("THIKHA_GRADIO_SHARE", "").lower() in ("1", "true", "yes"),
+    )
