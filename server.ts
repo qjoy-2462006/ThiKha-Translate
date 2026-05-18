@@ -185,6 +185,7 @@ async function startServer() {
       if (req.method === "GET" && req.path === "/api/health") return true;
       if (req.method === "GET" && /^\/api\/jobs\/[^/]+\/(progress|meta|download)$/.test(req.path))
         return true;
+      if (req.method === "POST" && req.path === "/api/inspect") return true;
       return false;
     },
   });

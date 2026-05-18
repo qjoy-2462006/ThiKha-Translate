@@ -638,6 +638,8 @@ def main():
     print(f"  Output size : {out_kb:.1f} KB")
     print("=" * 44)
 
+    emit_progress("verify", 1, 1, "Output verified")
+
     if report["overflow_count"]:
         print(f"\n  See overflow_report.txt for {report['overflow_count']} truncated blocks.")
 

@@ -95,6 +95,7 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const progressDoneRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -167,54 +168,6 @@ export default function App() {
     }
   };
 
-  const subscribeProgress = (id: string) => {
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-    const es = new EventSource(`${window.location.origin}/api/jobs/${id}/progress`);
-    esRef.current = es;
-    es.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data) as ProgressPayload;
-        if (data.event === "error") {
-          setError(data.error || "Translation failed");
-          setScreen("upload");
-          es.close();
-          return;
-        }
-        if (data.event === "complete" || data.status === "complete") {
-          setProgress((p) => ({
-            ...p,
-            step: "complete",
-            done: p.total || 100,
-            message: "Translation complete",
-          }));
-          void loadMeta(id);
-          es.close();
-          return;
-        }
-        if (data.status === "error") {
-          setError(data.error || "Translation failed");
-          setScreen("upload");
-          es.close();
-          return;
-        }
-        setProgress({
-          step: data.step || "",
-          done: data.done ?? 0,
-          total: Math.max(1, data.total ?? 100),
-          message: data.message || "",
-        });
-      } catch {
-        /* ignore malformed */
-      }
-    };
-    es.onerror = () => {
-      es.close();
-    };
-  };
-
   const loadMeta = async (id: string) => {
     try {
       const res = await fetch(`${window.location.origin}/api/jobs/${id}/meta`);
@@ -235,6 +188,54 @@ export default function App() {
     }
   };
 
+  const subscribeProgress = (id: string) => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+    const es = new EventSource(`${window.location.origin}/api/jobs/${id}/progress`);
+    esRef.current = es;
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as ProgressPayload;
+        if (data.event === "error" || data.status === "error") {
+          progressDoneRef.current = false;
+          setError(data.error || "Translation failed");
+          setScreen("upload");
+          es.close();
+          return;
+        }
+        if (
+          data.event === "complete" ||
+          data.status === "complete" ||
+          data.step === "complete"
+        ) {
+          if (progressDoneRef.current) return;
+          progressDoneRef.current = true;
+          setProgress((p) => ({
+            ...p,
+            step: "complete",
+            done: p.total || 100,
+            message: "Translation complete",
+          }));
+          void loadMeta(id).finally(() => es.close());
+          return;
+        }
+        setProgress({
+          step: data.step || "",
+          done: data.done ?? 0,
+          total: Math.max(1, data.total ?? 100),
+          message: data.message || "",
+        });
+      } catch {
+        /* ignore malformed */
+      }
+    };
+    es.onerror = () => {
+      es.close();
+    };
+  };
+
   const startTranslate = async () => {
     if (!file) return;
     const key = apiKey.trim();
@@ -246,6 +247,7 @@ export default function App() {
     setError(null);
     setDownloadError(null);
     setScreen("progress");
+    progressDoneRef.current = false;
     setProgress({ step: "starting", done: 0, total: 100, message: "Starting…" });
 
     const fd = new FormData();
@@ -301,6 +303,7 @@ export default function App() {
       esRef.current.close();
       esRef.current = null;
     }
+    progressDoneRef.current = false;
     setScreen("upload");
     setFile(null);
     setResult(null);

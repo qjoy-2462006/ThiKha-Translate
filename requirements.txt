@@ -1,0 +1,11 @@
+# ThiKha Translate — Python dependencies (recommended for local use)
+# Install: pip install -r requirements.txt
+
+pymupdf>=1.24.0
+google-generativeai>=0.8.0
+tqdm>=4.66.0
+myanmar-tools>=0.1.1
+rabbit-myanmar>=0.0.3
+
+# Optional: Gradio UI (python app.py)
+gradio>=4.0.0
