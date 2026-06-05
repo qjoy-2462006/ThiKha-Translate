@@ -118,10 +118,12 @@ except ImportError:
     import fitz
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as genai_types
 except ImportError:
-    install("google-generativeai")
-    import google.generativeai as genai
+    install("google-genai")
+    from google import genai
+    from google.genai import types as genai_types
 
 try:
     from tqdm import tqdm
@@ -217,13 +219,12 @@ def detect_domain(pdf_path: str, api_key: str) -> str:
         doc.close()
 
         words = " ".join(sample.split()[:500])
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        client = genai.Client(api_key=api_key)
         prompt = (
             "Classify this text into exactly one domain: medical/tech/academic/legal/general. "
             "Reply with ONE word only.\n\n" + words
         )
-        resp = model.generate_content(prompt)
+        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         detected = resp.text.strip().lower()
         for d in ("medical", "tech", "academic", "legal", "general"):
             if d in detected:
@@ -242,16 +243,16 @@ def ocr_page(page, api_key: str) -> list:
         pix = page.get_pixmap(dpi=300)
         img_bytes = pix.tobytes("png")
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        client = genai.Client(api_key=api_key)
         prompt = (
             "Extract ALL text from this document image. "
             "Return a JSON array of objects with keys: "
             "text, x_percent, y_percent, width_percent, height_percent, font_size_estimate. "
             "Coordinates as percentage of page size. Output ONLY the raw JSON array."
         )
-        response = model.generate_content(
-            [prompt, {"mime_type": "image/png", "data": img_bytes}]
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt, genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png")],
         )
 
         raw = response.text.strip()
@@ -371,8 +372,7 @@ def translate_blocks(blocks: list, api_key: str, domain: str):
     Generator: translates in batches of 10, yields batch size after each batch.
     [FIX #5] On failure, sets myanmar_text=None instead of falling back to English.
     """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    client = genai.Client(api_key=api_key)
     batch_size = 10
 
     for i in range(0, len(blocks), batch_size):
@@ -404,7 +404,7 @@ def translate_blocks(blocks: list, api_key: str, domain: str):
 
         while retries >= 0 and not success:
             try:
-                resp = model.generate_content(prompt)
+                resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
                 raw = resp.text.strip()
 
                 # Strip markdown fences if present
@@ -445,13 +445,12 @@ def translate_blocks(blocks: list, api_key: str, domain: str):
 
 def shorten_myanmar_text(text: str, api_key: str) -> str:
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        client = genai.Client(api_key=api_key)
         prompt = (
             f"Shorten this Myanmar text to 70% of its length while preserving meaning. "
             f"Output ONLY the shortened Myanmar text:\n{text}"
         )
-        resp = model.generate_content(prompt)
+        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         return resp.text.strip() or text
     except Exception as e:
         print(f"[shorten] failed: {e}", file=sys.stderr)

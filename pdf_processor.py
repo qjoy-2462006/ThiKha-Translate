@@ -89,10 +89,12 @@ except (ImportError, ModuleNotFoundError):
             raise ImportError(f"PyMuPDF (fitz) is not installed and could not be bootstrapped: {e}")
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types as genai_types
 except ImportError:
-    install("google-generativeai")
-    import google.generativeai as genai
+    install("google-genai")
+    from google import genai
+    from google.genai import types as genai_types
 
 try:
     from tqdm import tqdm
@@ -173,16 +175,15 @@ def ocr_page(page, api_key):
         img_bytes = pix.tobytes("png")
         
         # 2. Configure Gemini
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        client = genai.Client(api_key=api_key)
         
         # 3. Request OCR
         prompt = "Extract ALL text from this document image. Return as JSON array of objects: {text, x_percent, y_percent, width_percent, height_percent, font_size_estimate}. Coordinates as percentage of page size. Output ONLY the raw JSON array."
         
-        response = model.generate_content([
-            prompt,
-            {"mime_type": "image/png", "data": img_bytes}
-        ])
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt, genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png")],
+        )
         
         # 4. Parse response
         text_resp = response.text.strip()
@@ -310,8 +311,7 @@ def translate_blocks_to_myanmar(blocks, api_key, domain="auto"):
         print("API Key required for translation", file=sys.stderr)
         return blocks
 
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    client = genai.Client(api_key=api_key)
     
     # Filter blocks: skip < 3 chars
     translate_indices = [i for i, b in enumerate(blocks) if len(b["text"].strip()) >= 3]
@@ -354,7 +354,7 @@ Texts to translate:
                 # Actual print for logging
                 print(f"Translating blocks {i + 1} to {min(i + batch_size, total_to_translate)} of {total_to_translate}...", file=sys.stderr)
                 
-                response = model.generate_content(prompt)
+                response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
                 
                 # Extract JSON array
                 text_resp = response.text.strip()
