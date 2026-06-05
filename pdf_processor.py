@@ -96,6 +96,47 @@ except ImportError:
     from google import genai
     from google.genai import types as genai_types
 
+
+def _resolve_model(model: str):
+    m = model.lower().strip()
+    if m in ("openai", "gpt4o", "gpt-4o") or m.startswith("gpt-"):
+        return "openai", model if model.startswith("gpt-") else "gpt-4o-mini"
+    if m in ("claude", "anthropic") or m.startswith("claude-"):
+        return "claude", model if model.startswith("claude-") else "claude-3-haiku-20240307"
+    return "gemini", model if model.startswith("gemini-") else "gemini-2.0-flash"
+
+
+def call_llm(prompt: str, api_key: str, model: str = "gemini-2.0-flash",
+             image_bytes=None) -> str:
+    provider, canonical = _resolve_model(model)
+    if provider == "openai":
+        from openai import OpenAI
+        c = OpenAI(api_key=api_key)
+        if image_bytes:
+            import base64
+            b64 = base64.b64encode(image_bytes).decode()
+            content = [{"type": "text", "text": prompt},
+                       {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
+        else:
+            content = prompt
+        r = c.chat.completions.create(model=canonical, messages=[{"role": "user", "content": content}])
+        return r.choices[0].message.content or ""
+    if provider == "claude":
+        import anthropic
+        c = anthropic.Anthropic(api_key=api_key)
+        if image_bytes:
+            import base64
+            b64 = base64.b64encode(image_bytes).decode()
+            mc = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                  {"type": "text", "text": prompt}]
+        else:
+            mc = prompt
+        r2 = c.messages.create(model=canonical, max_tokens=4096, messages=[{"role": "user", "content": mc}])
+        return r2.content[0].text or ""
+    g = genai.Client(api_key=api_key)
+    cnt = [prompt, genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png")] if image_bytes else prompt
+    return g.models.generate_content(model=canonical, contents=cnt).text or ""
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -163,30 +204,24 @@ def get_page_dimensions(pdf_path):
         return []
     return dimensions
 
-def ocr_page(page, api_key):
-    """Performs OCR on a page using Gemini 1.5 Pro Vision."""
+def ocr_page(page, api_key, model="gemini-2.0-flash"):
+    """Performs OCR on a scanned page using an AI vision model."""
     if not api_key:
         return []
     
     try:
-        print(f"Page {page.number + 1} appears to be scanned. Running Gemini OCR...", file=sys.stderr)
+        print(f"Page {page.number + 1} appears to be scanned. Running OCR ({model})...", file=sys.stderr)
         # 1. Render page to image
         pix = page.get_pixmap(dpi=300)
         img_bytes = pix.tobytes("png")
         
-        # 2. Configure Gemini
-        client = genai.Client(api_key=api_key)
-        
-        # 3. Request OCR
+        # 2. Request OCR via unified helper
         prompt = "Extract ALL text from this document image. Return as JSON array of objects: {text, x_percent, y_percent, width_percent, height_percent, font_size_estimate}. Coordinates as percentage of page size. Output ONLY the raw JSON array."
         
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[prompt, genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png")],
-        )
+        response_text = call_llm(prompt, api_key, model, image_bytes=img_bytes)
         
         # 4. Parse response
-        text_resp = response.text.strip()
+        text_resp = response_text.strip()
         # Clean markdown
         if "```json" in text_resp:
             text_resp = text_resp.split("```json")[1].split("```")[0].strip()
@@ -302,16 +337,14 @@ def extract_pdf_blocks(pdf_path, api_key=None):
         print(f"Error processing PDF: {e}", file=sys.stderr)
         return [], 0, 0
 
-def translate_blocks_to_myanmar(blocks, api_key, domain="auto"):
+def translate_blocks_to_myanmar(blocks, api_key, domain="auto", model="gemini-2.0-flash"):
     """
-    Translates block text to Myanmar using Gemini-1.5-pro.
+    Translates block text to Myanmar using the selected AI model.
     Groups in batches of 10.
     """
     if not api_key:
         print("API Key required for translation", file=sys.stderr)
         return blocks
-
-    client = genai.Client(api_key=api_key)
     
     # Filter blocks: skip < 3 chars
     translate_indices = [i for i, b in enumerate(blocks) if len(b["text"].strip()) >= 3]
@@ -354,10 +387,10 @@ Texts to translate:
                 # Actual print for logging
                 print(f"Translating blocks {i + 1} to {min(i + batch_size, total_to_translate)} of {total_to_translate}...", file=sys.stderr)
                 
-                response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+                response_text = call_llm(prompt, api_key, model)
                 
                 # Extract JSON array
-                text_resp = response.text.strip()
+                text_resp = response_text.strip()
                 # Clean markdown
                 if text_resp.startswith("```json"):
                     # Find first [ and last ]

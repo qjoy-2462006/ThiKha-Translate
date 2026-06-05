@@ -22,6 +22,15 @@ import { motion, AnimatePresence } from "motion/react";
 const API_KEY_HEADER = "x-gemini-api-key";
 const SESSION_KEY = "thikha_gemini_api_key";
 
+const AI_MODELS = [
+  { value: "gemini-2.0-flash",         label: "Gemini 2.0 Flash",     provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
+  { value: "gemini-1.5-pro",           label: "Gemini 1.5 Pro",       provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
+  { value: "gpt-4o-mini",              label: "GPT-4o mini",          provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
+  { value: "gpt-4o",                   label: "GPT-4o",               provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
+  { value: "claude-3-haiku-20240307",  label: "Claude 3 Haiku",       provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
+  { value: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet",  provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
+];
+
 interface PDFBlock {
   page_number: number;
   block_index: number;
@@ -76,6 +85,7 @@ function formatBytes(n: number): string {
 export default function App() {
   const [screen, setScreen] = useState<Screen>("upload");
   const [apiKey, setApiKey] = useState("");
+  const [aiModel, setAiModel] = useState("gemini-2.0-flash");
   const [file, setFile] = useState<File | null>(null);
   const [domain, setDomain] = useState("auto");
   const [pages, setPages] = useState("all");
@@ -256,6 +266,7 @@ export default function App() {
     const url = new URL("/api/jobs", window.location.origin);
     url.searchParams.set("domain", domain);
     url.searchParams.set("pages", pages.trim() || "all");
+    url.searchParams.set("model", aiModel);
 
     try {
       const res = await fetch(url.toString(), {
@@ -452,30 +463,63 @@ export default function App() {
               </div>
 
               <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-4">
-                <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
-                  <KeyRound className="w-4 h-4 text-blue-600" />
-                  Gemini API key
+                {/* Model selector */}
+                <div>
+                  <label className="block text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-2">
+                    AI Model
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {AI_MODELS.map((m) => (
+                      <button
+                        key={m.value}
+                        type="button"
+                        onClick={() => setAiModel(m.value)}
+                        className={`text-left px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
+                          aiModel === m.value
+                            ? "border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-400"
+                            : "border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50"
+                        }`}
+                      >
+                        <div className="font-semibold truncate">{m.label}</div>
+                        <div className="text-[10px] opacity-60 mt-0.5">{m.provider}</div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={apiKey}
-                  onChange={(e) => {
-                    setApiKey(e.target.value);
-                    persistApiKey(e.target.value);
-                  }}
-                  placeholder="Paste your API key (stored in this browser tab only)"
-                  className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                />
-                <p className="text-[11px] text-gray-500">
-                  Sent to your local server only via the{" "}
-                  <code className="text-[10px] bg-gray-100 px-1 rounded">{API_KEY_HEADER}</code>{" "}
-                  header — not embedded in the page bundle. Optional: set{" "}
-                  <code className="text-[10px] bg-gray-100 px-1 rounded">GEMINI_API_KEY</code> in{" "}
-                  <code className="text-[10px] bg-gray-100 px-1 rounded">.env.local</code> instead.
-                </p>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                {/* API Key */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <KeyRound className="w-4 h-4 text-blue-600" />
+                      {AI_MODELS.find(m => m.value === aiModel)?.provider ?? "AI"} API Key
+                    </div>
+                    <a
+                      href={AI_MODELS.find(m => m.value === aiModel)?.keyLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-blue-500 hover:underline"
+                    >
+                      Get key ↗
+                    </a>
+                  </div>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={apiKey}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      persistApiKey(e.target.value);
+                    }}
+                    placeholder="Paste your API key (stored in this browser tab only)"
+                    className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1.5">
+                    Sent to your local server only — not embedded in the page bundle.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
                   <div>
                     <label className="block text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-1">
                       Domain

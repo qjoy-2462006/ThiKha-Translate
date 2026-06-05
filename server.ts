@@ -335,11 +335,12 @@ async function startServer() {
     const filePath = req.file.path;
     const translate = req.query.translate === "true";
     const domain = normalizeDomain((req.query.domain as string) || "auto");
+    const model = (req.query.model as string) || "gemini-2.0-flash";
 
     try {
       const stdout = await runPython(
         PYTHON_EXTRACT,
-        [filePath, domain, String(translate)],
+        [filePath, domain, String(translate), model],
         { GEMINI_API_KEY: apiKey }
       );
       res.json(JSON.parse(stdout));
@@ -377,6 +378,7 @@ async function startServer() {
     const inputPath = req.file.path;
     const domain = normalizeDomain((req.query.domain as string) || "auto");
     const pages = (req.query.pages as string) || "all";
+    const model = (req.query.model as string) || "gemini-2.0-flash";
     const outputName = `translated_${Date.now()}.pdf`;
     const outputPath = path.join("outputs", outputName);
 
@@ -434,6 +436,8 @@ async function startServer() {
             domain,
             "--pages",
             pages,
+            "--model",
+            model,
           ],
           { GEMINI_API_KEY: apiKey },
           onStderrLine
@@ -561,6 +565,7 @@ async function startServer() {
     const inputPath = req.file.path;
     const domain = normalizeDomain((req.query.domain as string) || "auto");
     const pages = (req.query.pages as string) || "all";
+    const model = (req.query.model as string) || "gemini-2.0-flash";
     const outputName = `translated_${Date.now()}.pdf`;
     const outputPath = path.join("outputs", outputName);
 
@@ -586,6 +591,8 @@ async function startServer() {
           domain,
           "--pages",
           pages,
+          "--model",
+          model,
         ],
         { GEMINI_API_KEY: apiKey }
       );

@@ -1,0 +1,13 @@
+Step 1: Project ကို Replit သို့ Import လုပ်ခြင်းReplit တွင် "Create Repl" ကို နှိပ်ပါ။"Import from GitHub" ကို ရွေးချယ်ပြီး သင့်၏ Repository URL ကို ထည့်သွင်းကာ Import လုပ်ပါ။Language Template အနေဖြင့် "Node.js" ကို ရွေးချယ်ပါ။Step 2: System Dependencies သတ်မှတ်ခြင်း (replit.nix)Node.js environment တွင် Python အလုပ်လုပ်နိုင်ရန် replit.nix ဖိုင်ကို ပြင်ဆင်ရန် လိုအပ်ပါသည်။ဘယ်ဘက် Files menu ရှိ Show hidden files ကို ဖွင့်ပါ။replit.nix ဖိုင်ကို ဖွင့်ပြီး အောက်ပါအတိုင်း ပြင်ဆင်ပါ-Nix{ pkgs }: {
+  deps = [
+    pkgs.nodejs-20_x
+    pkgs.python311
+    pkgs.python311Packages.pip
+  ];
+}
+Step 3: Run Command သတ်မှတ်ခြင်း (.replit)Replit ၏ "Run" ခလုတ်ကို နှိပ်လိုက်တိုင်း Server အလိုအလျောက် ပွင့်လာစေရန် .replit ဖိုင်ကို အောက်ပါအတိုင်း ပြင်ဆင်ပါ-Ini, TOMLrun = "npm run dev"
+Step 4: Python & Node.js Dependencies များ သွင်းခြင်းReplit ၏ Shell (Terminal) ကို ဖွင့်ပြီး အောက်ပါ Command များကို တစ်ကြောင်းချင်းစီ ရိုက်ထည့်ပါ-၁။ Python Virtual Environment ဆောက်ရန် နှင့် Packages များသွင်းရန်-Bashpython3 -m venv venv
+source venv/bin/activate
+pip install -r requirements-docker.txt
+၂။ Node.js Packages များ သွင်းရန်-Bashnpm install
+Step 5: Environment Variables (Secrets) သတ်မှတ်ခြင်းProject တွင် .env.example ဖိုင်ကို နမူနာအဖြစ် ပေးထားပါသည်။ Replit တွင် လုံခြုံရေးအရ .env အစား Secrets ကို အသုံးပြုပါ။  Replit ၏ ဘယ်ဘက် Sidebar မှ "Secrets" (Tools > Secrets) ကို သွားပါ။အောက်ပါ Keys များကို ထည့်သွင်းပါ-Key: GEMINI_API_KEY | Value: သင့်၏_Google_Gemini_API_KeyKey: PYTHON_BIN | Value: venv/bin/pythonStep 6: Font Files များ စစ်ဆေးခြင်းProject တွင် လိုအပ်သော Unicode Fonts များကို Unicode Fonts-20251026T091440Z-1-001/Unicode Fonts/ Folder အတွင်း ထည့်သွင်းပေးထားပါသည်။ PDF Processing ပိုင်းတွင် အဆိုပါ ဖောင့်များ မှန်ကန်စွာ ချိတ်ဆက်မိစေရန် Main Directory တွင် လိုအပ်သော ဖောင့်ဖိုင်များ (ဥပမာ- Pyidaungsu.ttf) ရှိ/မရှိ သေချာစွာ စစ်ဆေးပါ။ မရှိပါက ထပ်မံ Upload လုပ်ပေးပါ။  Step 7: Application အား စတင် Run ခြင်းအထက်ပါအဆင့်များ အားလုံး ပြီးစီးပါက Replit အပေါ်ဘက်ရှိ အစိမ်းရောင် "Run" ခလုတ်ကို နှိပ်လိုက်ပါ။Terminal တွင် Server is running on port 3000 ဟု ပေါ်လာမည်ဖြစ်ပြီး၊ Replit ၏ Webview တွင် ThiKha-Translate ၏ Web UI ကို စတင်အသုံးပြုနိုင်ပြီ ဖြစ်သည်။

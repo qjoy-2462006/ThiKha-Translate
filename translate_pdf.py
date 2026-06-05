@@ -125,6 +125,73 @@ except ImportError:
     from google import genai
     from google.genai import types as genai_types
 
+
+# ---------------------------------------------------------------------------
+# Model-agnostic LLM helper — Gemini / OpenAI / Claude
+# ---------------------------------------------------------------------------
+
+def _resolve_model(model: str) -> tuple[str, str]:
+    """Return (provider, canonical_model_name) from a model string."""
+    m = model.lower().strip()
+    if m in ("openai", "gpt4o", "gpt-4o") or m.startswith("gpt-"):
+        return "openai", model if model.startswith("gpt-") else "gpt-4o-mini"
+    if m in ("claude", "anthropic") or m.startswith("claude-"):
+        return "claude", model if model.startswith("claude-") else "claude-3-haiku-20240307"
+    canonical = model if model.startswith("gemini-") else "gemini-2.0-flash"
+    return "gemini", canonical
+
+
+def call_llm(prompt: str, api_key: str, model: str = "gemini-2.0-flash",
+             image_bytes: bytes | None = None) -> str:
+    """Single entry point for all LLM calls. Returns plain text."""
+    provider, canonical = _resolve_model(model)
+
+    if provider == "openai":
+        from openai import OpenAI  # type: ignore
+        client_oai = OpenAI(api_key=api_key)
+        if image_bytes:
+            import base64
+            b64 = base64.b64encode(image_bytes).decode()
+            content: object = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ]
+        else:
+            content = prompt
+        resp = client_oai.chat.completions.create(
+            model=canonical,
+            messages=[{"role": "user", "content": content}],
+        )
+        return resp.choices[0].message.content or ""
+
+    if provider == "claude":
+        import anthropic  # type: ignore
+        client_ant = anthropic.Anthropic(api_key=api_key)
+        if image_bytes:
+            import base64
+            b64 = base64.b64encode(image_bytes).decode()
+            msg_content: object = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            msg_content = prompt
+        resp_ant = client_ant.messages.create(
+            model=canonical,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": msg_content}],
+        )
+        return resp_ant.content[0].text or ""  # type: ignore[union-attr]
+
+    # Default: Gemini
+    g_client = genai.Client(api_key=api_key)
+    if image_bytes:
+        contents: object = [prompt, genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png")]
+    else:
+        contents = prompt
+    resp_g = g_client.models.generate_content(model=canonical, contents=contents)
+    return resp_g.text or ""
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -208,7 +275,7 @@ def int_to_rgb(color_int) -> tuple:
 # Domain detection
 # ---------------------------------------------------------------------------
 
-def detect_domain(pdf_path: str, api_key: str) -> str:
+def detect_domain(pdf_path: str, api_key: str, model: str = "gemini-2.0-flash") -> str:
     try:
         doc = fitz.open(pdf_path)
         sample = ""
@@ -219,13 +286,11 @@ def detect_domain(pdf_path: str, api_key: str) -> str:
         doc.close()
 
         words = " ".join(sample.split()[:500])
-        client = genai.Client(api_key=api_key)
         prompt = (
             "Classify this text into exactly one domain: medical/tech/academic/legal/general. "
             "Reply with ONE word only.\n\n" + words
         )
-        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        detected = resp.text.strip().lower()
+        detected = call_llm(prompt, api_key, model).strip().lower()
         for d in ("medical", "tech", "academic", "legal", "general"):
             if d in detected:
                 return d
@@ -238,24 +303,18 @@ def detect_domain(pdf_path: str, api_key: str) -> str:
 # OCR fallback for scanned pages (Gemini Vision)
 # ---------------------------------------------------------------------------
 
-def ocr_page(page, api_key: str) -> list:
+def ocr_page(page, api_key: str, model: str = "gemini-2.0-flash") -> list:
     try:
         pix = page.get_pixmap(dpi=300)
         img_bytes = pix.tobytes("png")
 
-        client = genai.Client(api_key=api_key)
         prompt = (
             "Extract ALL text from this document image. "
             "Return a JSON array of objects with keys: "
             "text, x_percent, y_percent, width_percent, height_percent, font_size_estimate. "
             "Coordinates as percentage of page size. Output ONLY the raw JSON array."
         )
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[prompt, genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png")],
-        )
-
-        raw = response.text.strip()
+        raw = call_llm(prompt, api_key, model, image_bytes=img_bytes).strip()
         if "```" in raw:
             raw = raw.split("```")[1].lstrip("json").strip()
         start, end = raw.find("["), raw.rfind("]") + 1
@@ -289,7 +348,7 @@ def ocr_page(page, api_key: str) -> list:
 # [FIX #3] extract_pdf_blocks — always returns consistent 3-tuple
 # ---------------------------------------------------------------------------
 
-def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = None):
+def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = None, model: str = "gemini-2.0-flash"):
     """
     Returns (blocks, processed_page_count, total_block_count).
     Consistent 3-tuple — fixes the 2 vs 3 value mismatch between files.
@@ -318,7 +377,7 @@ def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = No
 
             if not has_text and api_key:
                 print(f"[extract] page {p_idx + 1} appears scanned — OCR fallback", file=sys.stderr)
-                ocr = ocr_page(page, api_key)
+                ocr = ocr_page(page, api_key, model)
                 blocks_data.extend(ocr)
                 total_blocks += len(ocr)
                 continue
@@ -367,12 +426,11 @@ def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = No
 # Translation — batch via Gemini
 # ---------------------------------------------------------------------------
 
-def translate_blocks(blocks: list, api_key: str, domain: str):
+def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemini-2.0-flash"):
     """
     Generator: translates in batches of 10, yields batch size after each batch.
     [FIX #5] On failure, sets myanmar_text=None instead of falling back to English.
     """
-    client = genai.Client(api_key=api_key)
     batch_size = 10
 
     for i in range(0, len(blocks), batch_size):
@@ -404,8 +462,7 @@ def translate_blocks(blocks: list, api_key: str, domain: str):
 
         while retries >= 0 and not success:
             try:
-                resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-                raw = resp.text.strip()
+                raw = call_llm(prompt, api_key, model).strip()
 
                 # Strip markdown fences if present
                 if "```" in raw:
@@ -443,15 +500,13 @@ def translate_blocks(blocks: list, api_key: str, domain: str):
 # Shorten text via Gemini (overflow recovery)
 # ---------------------------------------------------------------------------
 
-def shorten_myanmar_text(text: str, api_key: str) -> str:
+def shorten_myanmar_text(text: str, api_key: str, model: str = "gemini-2.0-flash") -> str:
     try:
-        client = genai.Client(api_key=api_key)
         prompt = (
             f"Shorten this Myanmar text to 70% of its length while preserving meaning. "
             f"Output ONLY the shortened Myanmar text:\n{text}"
         )
-        resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-        return resp.text.strip() or text
+        return call_llm(prompt, api_key, model).strip() or text
     except Exception as e:
         print(f"[shorten] failed: {e}", file=sys.stderr)
         return text
@@ -467,6 +522,7 @@ def write_myanmar_pdf(
     blocks: list,
     font_path: str,
     api_key: str = None,
+    model: str = "gemini-2.0-flash",
 ) -> dict:
     """
     Overlay Myanmar text onto original PDF, preserving all images and layout.
@@ -530,9 +586,9 @@ def write_myanmar_pdf(
                 inserted = True
                 break
 
-        # Attempt 2: ask Gemini to shorten the text
+        # Attempt 2: ask LLM to shorten the text
         if not inserted and api_key:
-            shorter = shorten_myanmar_text(m_text, api_key)
+            shorter = shorten_myanmar_text(m_text, api_key, model)
             result = page.insert_textbox(
                 bbox,
                 shorter,
@@ -594,12 +650,15 @@ def main():
     parser.add_argument("--domain",  default="auto",
                         choices=["auto", "medical", "tech", "academic", "legal", "general"])
     parser.add_argument("--pages",   default="all",  help="Page range: 'all' or '1-5'")
+    parser.add_argument("--model",   default="gemini-2.0-flash",
+                        help="AI model: gemini-2.0-flash | gpt-4o-mini | claude-3-haiku-20240307")
     args = parser.parse_args()
 
-    api_key = args.api_key or os.getenv("GEMINI_API_KEY")
+    api_key = args.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY")
     if not api_key:
-        print("ERROR: Gemini API key required (--api-key or GEMINI_API_KEY env var)")
+        print("ERROR: API key required (--api-key or GEMINI_API_KEY / AI_API_KEY env var)")
         sys.exit(1)
+    ai_model = args.model or "gemini-2.0-flash"
 
     # [FIX #6] Validate font early — fail fast with clear message
     if not os.path.exists(args.font):
@@ -620,7 +679,7 @@ def main():
     # Step 1: Extract
     print("\nStep 1: [EXTRACT] Scanning PDF structure...")
     emit_progress("extract", 0, 100, "Scanning PDF structure…")
-    blocks, processed_pages, total_blocks = extract_pdf_blocks(args.input, args.pages, api_key)
+    blocks, processed_pages, total_blocks = extract_pdf_blocks(args.input, args.pages, api_key, ai_model)
     print(f"         Found {total_blocks} text blocks across {processed_pages} pages.")
     emit_progress(
         "extract",
@@ -640,17 +699,17 @@ def main():
     if domain == "auto":
         print("Step 2: [DETECT]  Detecting document domain...")
         emit_progress("detect", 0, 1, "Detecting document domain…")
-        domain = detect_domain(args.input, api_key)
+        domain = detect_domain(args.input, api_key, ai_model)
     print(f"         Domain: {domain}")
     emit_progress("detect", 1, 1, f"Domain: {domain}", domain=domain)
 
     # Step 3: Translate
     n_blocks = len(blocks)
-    print(f"Step 3: [TRANSLATE] Translating {n_blocks} blocks via Gemini 1.5 Pro...")
+    print(f"Step 3: [TRANSLATE] Translating {n_blocks} blocks via {ai_model}...")
     emit_progress("translate", 0, n_blocks, f"Translating 0/{n_blocks} blocks…")
     pbar = tqdm(total=n_blocks, unit="block", file=sys.stderr)
     translated_so_far = 0
-    for batch_done in translate_blocks(blocks, api_key, domain):
+    for batch_done in translate_blocks(blocks, api_key, domain, ai_model):
         translated_so_far += batch_done
         pbar.update(batch_done)
         emit_progress(
@@ -667,7 +726,7 @@ def main():
     # Step 4: Write PDF
     print("Step 4: [WRITE]   Building Myanmar PDF...")
     emit_progress("write", 0, 1, "Building Myanmar PDF…")
-    report = write_myanmar_pdf(args.input, output_path, blocks, args.font, api_key)
+    report = write_myanmar_pdf(args.input, output_path, blocks, args.font, api_key, ai_model)
     emit_progress("write", 1, 1, "PDF built")
 
     # Step 5: Verify
