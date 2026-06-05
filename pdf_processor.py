@@ -128,8 +128,16 @@ except ImportError:
 try:
     from rabbit import zg2uni
 except ImportError:
-    install("rabbit-myanmar")
-    from rabbit import zg2uni
+    try:
+        install("rabbit-myanmar")
+        from rabbit import zg2uni
+    except Exception:
+        print(
+            "[thikha] rabbit-myanmar unavailable — Zawgyi→Unicode conversion off.",
+            file=sys.stderr,
+        )
+        def zg2uni(text: str) -> str:  # type: ignore[misc]
+            return text
 
 def is_valid_unicode_myanmar(text):
     if not text: return False
