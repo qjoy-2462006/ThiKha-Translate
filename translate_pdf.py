@@ -426,15 +426,28 @@ def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = No
 # Translation — batch via Gemini
 # ---------------------------------------------------------------------------
 
-def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemini-2.0-flash"):
+def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemini-2.0-flash",
+                     glossary: dict | None = None):
     """
     Generator: translates in batches of 10, yields batch size after each batch.
+    Supports custom glossary injection and context-aware cross-page translation.
     [FIX #5] On failure, sets myanmar_text=None instead of falling back to English.
     """
     batch_size = 10
+    page_context = ""
+    prev_page_texts: list[str] = []
+    current_page: int | None = None
 
     for i in range(0, len(blocks), batch_size):
         batch = blocks[i: i + batch_size]
+
+        # Detect page change → snapshot context from completed page
+        batch_first_page = batch[0]["page_number"] if batch else None
+        if current_page is not None and batch_first_page != current_page and prev_page_texts:
+            combined = " ".join(prev_page_texts)
+            page_context = combined[-350:] if len(combined) > 350 else combined
+            prev_page_texts = []
+        current_page = batch[-1]["page_number"] if batch else current_page
 
         lines = []
         for j, b in enumerate(batch):
@@ -444,10 +457,26 @@ def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemi
                 f"{j + 1}. {b['text']} "
                 f"(target ≈{char_limit} Myanmar chars, bbox width {int(w)}px)"
             )
+            prev_page_texts.append(b["text"])
+
+        glossary_section = ""
+        if glossary:
+            glossary_section = "\nGlossary (ALWAYS use these exact translations for these terms):\n"
+            for src, tgt in glossary.items():
+                glossary_section += f'  "{src}" → "{tgt}"\n'
+
+        context_section = ""
+        if page_context:
+            context_section = (
+                f"\nPrevious page context (use for cross-page consistency):\n"
+                f"  …{page_context}\n"
+            )
 
         prompt = (
             f"Translate each numbered text to Myanmar Unicode.\n"
             f"Domain: {domain}\n"
+            f"{glossary_section}"
+            f"{context_section}"
             f"Rules:\n"
             f"  - Output ONLY a JSON array of strings, same order, same count.\n"
             f"  - Unicode Myanmar ONLY (U+1000–U+109F range). Never Zawgyi.\n"
@@ -652,6 +681,8 @@ def main():
     parser.add_argument("--pages",   default="all",  help="Page range: 'all' or '1-5'")
     parser.add_argument("--model",   default="gemini-2.0-flash",
                         help="AI model: gemini-2.0-flash | gpt-4o-mini | claude-3-haiku-20240307")
+    parser.add_argument("--glossary", default=None,
+                        help="Custom glossary as JSON string: {\"server\":\"ဆာဗာ\", ...}")
     args = parser.parse_args()
 
     api_key = args.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("AI_API_KEY")
@@ -659,6 +690,16 @@ def main():
         print("ERROR: API key required (--api-key or GEMINI_API_KEY / AI_API_KEY env var)")
         sys.exit(1)
     ai_model = args.model or "gemini-2.0-flash"
+
+    glossary: dict | None = None
+    if args.glossary:
+        try:
+            glossary = json.loads(args.glossary)
+            if not isinstance(glossary, dict):
+                glossary = None
+        except Exception as e:
+            print(f"[glossary] failed to parse: {e}", file=sys.stderr)
+            glossary = None
 
     # [FIX #6] Validate font early — fail fast with clear message
     if not os.path.exists(args.font):
@@ -709,7 +750,7 @@ def main():
     emit_progress("translate", 0, n_blocks, f"Translating 0/{n_blocks} blocks…")
     pbar = tqdm(total=n_blocks, unit="block", file=sys.stderr)
     translated_so_far = 0
-    for batch_done in translate_blocks(blocks, api_key, domain, ai_model):
+    for batch_done in translate_blocks(blocks, api_key, domain, ai_model, glossary=glossary):
         translated_so_far += batch_done
         pbar.update(batch_done)
         emit_progress(

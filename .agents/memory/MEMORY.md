@@ -1,0 +1,1 @@
+- [ThiKha Feature Architecture](thikha-features.md) — 7 features added; review screen is always shown after job completes (HITL flow before download).
