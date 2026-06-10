@@ -304,7 +304,24 @@ export default function App() {
       {/* Header */}
       <header className="border-b border-zinc-100 h-14 flex items-center px-6 sticky top-0 bg-white/95 backdrop-blur-sm z-10">
         <div className="max-w-2xl mx-auto w-full flex items-center justify-between">
-          <span className="font-semibold text-base tracking-tight">ThiKha Translate</span>
+          <div className="flex items-center gap-2.5">
+            {/* App icon: doc lines → arrow → myanmar lines */}
+            <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="30" height="30" rx="8" fill="#09090b"/>
+              {/* Left: latin text lines */}
+              <line x1="6" y1="11" x2="12" y2="11" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <line x1="6" y1="15" x2="12" y2="15" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <line x1="6" y1="19" x2="9.5" y2="19" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              {/* Arrow */}
+              <path d="M14 15H16" stroke="white" strokeWidth="1.4" strokeLinecap="round"/>
+              <path d="M15.5 13.5L17 15L15.5 16.5" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+              {/* Right: myanmar-style lines (curved top, shorter bottom) */}
+              <line x1="19" y1="11" x2="24" y2="11" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+              <path d="M19 15 Q21 13.5 24 15" stroke="white" strokeWidth="1.6" strokeLinecap="round" fill="none"/>
+              <line x1="20.5" y1="19" x2="24" y2="19" stroke="white" strokeWidth="1.6" strokeLinecap="round"/>
+            </svg>
+            <span className="font-semibold text-base tracking-tight">ThiKha Translate</span>
+          </div>
           {result && (screen==="review"||screen==="result") && (
             <span className="text-sm text-zinc-400">
               {result.summary.total_pages}p · {qualityPct}% translated
