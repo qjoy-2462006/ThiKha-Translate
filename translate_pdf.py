@@ -137,18 +137,34 @@ def _resolve_model(model: str) -> tuple[str, str]:
         return "openai", model if model.startswith("gpt-") else "gpt-4o-mini"
     if m in ("claude", "anthropic") or m.startswith("claude-"):
         return "claude", model if model.startswith("claude-") else "claude-3-haiku-20240307"
-    canonical = model if model.startswith("gemini-") else "gemini-2.0-flash"
+    # Normalise Gemini model names — the google-genai SDK uses the canonical
+    # model IDs; some aliases differ between API versions.
+    GEMINI_ALIASES: dict[str, str] = {
+        "gemini-1.5-pro":        "gemini-1.5-pro-latest",
+        "gemini-1.5-flash":      "gemini-1.5-flash-latest",
+        "gemini-1.0-pro":        "gemini-1.0-pro-latest",
+    }
+    if model.startswith("gemini-"):
+        canonical = GEMINI_ALIASES.get(model, model)
+    else:
+        canonical = "gemini-2.0-flash"
     return "gemini", canonical
+
+
+LLM_TIMEOUT_SECS = 90  # per-request hard timeout for all providers
 
 
 def call_llm(prompt: str, api_key: str, model: str = "gemini-2.0-flash",
              image_bytes: bytes | None = None) -> str:
-    """Single entry point for all LLM calls. Returns plain text."""
+    """Single entry point for all LLM calls. Returns plain text.
+    Every provider has a hard LLM_TIMEOUT_SECS timeout so a stalled request
+    never causes the entire translation to hang until Node kills the process.
+    """
     provider, canonical = _resolve_model(model)
 
     if provider == "openai":
         from openai import OpenAI  # type: ignore
-        client_oai = OpenAI(api_key=api_key)
+        client_oai = OpenAI(api_key=api_key, timeout=float(LLM_TIMEOUT_SECS))
         if image_bytes:
             import base64
             b64 = base64.b64encode(image_bytes).decode()
@@ -161,12 +177,17 @@ def call_llm(prompt: str, api_key: str, model: str = "gemini-2.0-flash",
         resp = client_oai.chat.completions.create(
             model=canonical,
             messages=[{"role": "user", "content": content}],
+            timeout=float(LLM_TIMEOUT_SECS),
         )
         return resp.choices[0].message.content or ""
 
     if provider == "claude":
         import anthropic  # type: ignore
-        client_ant = anthropic.Anthropic(api_key=api_key)
+        import httpx as _httpx
+        client_ant = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=_httpx.Timeout(LLM_TIMEOUT_SECS, connect=10.0),
+        )
         if image_bytes:
             import base64
             b64 = base64.b64encode(image_bytes).decode()
@@ -184,12 +205,15 @@ def call_llm(prompt: str, api_key: str, model: str = "gemini-2.0-flash",
         return resp_ant.content[0].text or ""  # type: ignore[union-attr]
 
     # Default: Gemini
-    g_client = genai.Client(api_key=api_key)
+    import httpx as _httpx
+    http_client = _httpx.Client(timeout=_httpx.Timeout(LLM_TIMEOUT_SECS, connect=10.0))
+    g_client = genai.Client(api_key=api_key, http_client=http_client)
     if image_bytes:
         contents: object = [prompt, genai_types.Part.from_bytes(data=image_bytes, mime_type="image/png")]
     else:
         contents = prompt
     resp_g = g_client.models.generate_content(model=canonical, contents=contents)
+    http_client.close()
     return resp_g.text or ""
 
 try:
@@ -438,6 +462,7 @@ def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemi
     page_context = ""
     prev_page_texts: list[str] = []
     current_page: int | None = None
+    consecutive_failures = 0
 
     for i in range(0, len(blocks), batch_size):
         batch = blocks[i: i + batch_size]
@@ -509,8 +534,30 @@ def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemi
                     batch[idx]["myanmar_text"] = t if t else None
 
                 success = True
+                consecutive_failures = 0  # reset on success
 
             except Exception as e:
+                err_str = str(e)
+                # Fast-fail on permanent errors — no point retrying
+                is_permanent = any(sig in err_str for sig in (
+                    "404", "NOT_FOUND", "not found",
+                    "401", "403", "PERMISSION_DENIED", "UNAUTHENTICATED",
+                    "invalid_api_key", "API key", "Invalid API",
+                    "model not found", "is not supported",
+                ))
+                if is_permanent:
+                    consecutive_failures += 1
+                    print(f"[translate] permanent error (no retry): {err_str[:200]}", file=sys.stderr)
+                    for b in batch:
+                        b["myanmar_text"] = None
+                    # Abort entire translation if 3 consecutive permanent failures
+                    if consecutive_failures >= 3:
+                        raise RuntimeError(
+                            f"FATAL: {consecutive_failures} consecutive permanent API errors. "
+                            f"Check your API key and model name. Last error: {err_str[:300]}"
+                        )
+                    break  # skip retries for this batch
+
                 retries -= 1
                 if retries >= 0:
                     jitter = random.uniform(0.5, 1.5)
@@ -518,8 +565,8 @@ def translate_blocks(blocks: list, api_key: str, domain: str, model: str = "gemi
                     time.sleep(wait * jitter)
                     wait *= 2
                 else:
+                    consecutive_failures += 1
                     print(f"[translate] batch {i}–{i + len(batch)} failed permanently", file=sys.stderr)
-                    # [FIX #5] Use None, not English fallback
                     for b in batch:
                         b["myanmar_text"] = None
 

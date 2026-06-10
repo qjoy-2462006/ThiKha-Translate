@@ -17,7 +17,7 @@ const GLOSSARY_LOC    = "thikha_glossary_v1";
 
 const AI_MODELS = [
   { value: "gemini-2.0-flash",           label: "Gemini 2.0 Flash",   provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
-  { value: "gemini-1.5-pro",             label: "Gemini 1.5 Pro",     provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
+  { value: "gemini-1.5-pro",             label: "Gemini 1.5 Pro",     provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },  // resolved to gemini-1.5-pro-latest
   { value: "gpt-4o-mini",                label: "GPT-4o mini",        provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
   { value: "gpt-4o",                     label: "GPT-4o",             provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
   { value: "claude-3-haiku-20240307",    label: "Claude 3 Haiku",     provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
@@ -554,12 +554,25 @@ export default function App() {
               </Accordion>
 
               {/* Error */}
-              {error && (
-                <div className="flex items-start gap-2.5 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <p className="leading-relaxed">{error}</p>
-                </div>
-              )}
+              {error && (() => {
+                const isTimeout = error.startsWith("TIMEOUT:");
+                const mainMsg = isTimeout ? "Translation timed out." : error;
+                return (
+                  <div className={`flex items-start gap-2.5 text-sm rounded-xl px-4 py-3 border ${isTimeout ? "text-amber-800 bg-amber-50 border-amber-100" : "text-red-600 bg-red-50 border-red-100"}`}>
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div className="space-y-1.5">
+                      <p className="font-medium">{mainMsg}</p>
+                      {isTimeout && (
+                        <ul className="text-xs space-y-1 text-amber-700 list-none">
+                          <li>→ Try a specific page range: set Pages to <strong>1–10</strong> instead of "all"</li>
+                          <li>→ Switch to <strong>Gemini 2.0 Flash</strong> — it's the fastest model</li>
+                          <li>→ Check your API key still has quota (rate limit may have stalled it)</li>
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* CTA */}
               <button

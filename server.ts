@@ -147,7 +147,10 @@ function runPython(
     if (onProcess) onProcess(proc);
 
     let stdout = "", stderr = "", stderrBuf = "";
-    const timer = setTimeout(() => { proc.kill("SIGTERM"); reject(new Error("Timed out — try a smaller page range")); }, PYTHON_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      proc.kill("SIGTERM");
+      reject(new Error("TIMEOUT: The translation took too long and was stopped. Tips: (1) Use a specific page range like 1-10 instead of 'all'. (2) Switch to Gemini 2.0 Flash — it's the fastest model. (3) Check your API key has sufficient quota."));
+    }, PYTHON_TIMEOUT_MS);
 
     proc.stdout?.on("data", (d) => (stdout += d.toString()));
     proc.stderr?.on("data", (d) => {
