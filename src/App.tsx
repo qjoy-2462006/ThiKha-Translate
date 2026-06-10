@@ -5,29 +5,30 @@
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
-  FileUp, FileText, Layout, Type, Maximize2, Info, Loader2,
+  FileUp, FileText, Layout, Type, Info, Loader2,
   CheckCircle2, AlertCircle, Download, KeyRound, Plus, Trash2,
   BookOpen, ChevronDown, ChevronUp, Upload, Pencil, Eye,
-  SplitSquareHorizontal, ArrowLeft, ArrowRight, Lock,
+  SplitSquareHorizontal, ArrowLeft, ArrowRight, Lock, X,
+  ExternalLink, Filter, SkipForward, Save,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 const API_KEY_HEADER = "x-gemini-api-key";
 const CRYPTO_KEY_SESSION = "thikha_enc_key";
 const CRYPTO_DATA_LOCAL  = "thikha_enc_data_v2";
+const GLOSSARY_LOCAL     = "thikha_glossary_v1";
 
 const AI_MODELS = [
-  { value: "gemini-2.0-flash",          label: "Gemini 2.0 Flash",    provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
-  { value: "gemini-1.5-pro",            label: "Gemini 1.5 Pro",      provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
-  { value: "gpt-4o-mini",               label: "GPT-4o mini",         provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
-  { value: "gpt-4o",                    label: "GPT-4o",              provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
-  { value: "claude-3-haiku-20240307",   label: "Claude 3 Haiku",      provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
-  { value: "claude-3-5-sonnet-20241022",label: "Claude 3.5 Sonnet",   provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
+  { value: "gemini-2.0-flash",           label: "Gemini 2.0 Flash",    provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
+  { value: "gemini-1.5-pro",             label: "Gemini 1.5 Pro",      provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
+  { value: "gpt-4o-mini",                label: "GPT-4o mini",         provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
+  { value: "gpt-4o",                     label: "GPT-4o",              provider: "OpenAI",    keyLink: "https://platform.openai.com/api-keys" },
+  { value: "claude-3-haiku-20240307",    label: "Claude 3 Haiku",      provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
+  { value: "claude-3-5-sonnet-20241022", label: "Claude 3.5 Sonnet",   provider: "Anthropic", keyLink: "https://console.anthropic.com/settings/keys" },
 ];
 
 // ---------------------------------------------------------------------------
 // Web Crypto — AES-GCM encrypted API key storage
-// enc key lives in sessionStorage (tab-lifetime); ciphertext in localStorage
 // ---------------------------------------------------------------------------
 
 async function _getOrCreateEncKey(): Promise<CryptoKey | null> {
@@ -102,6 +103,7 @@ interface ExtractionResult {
 }
 
 type Screen = "upload" | "progress" | "review" | "result";
+type ReviewFilter = "all" | "translated" | "skipped" | "edited";
 
 interface InspectInfo { pages: number; size_bytes: number }
 interface ProgressPayload { status?: string; step?: string; done?: number; total?: number; message?: string; domain?: string; error?: string; event?: string }
@@ -122,6 +124,7 @@ const REVIEW_PAGE_SIZE = 25;
 export default function App() {
   const [screen, setScreen] = useState<Screen>("upload");
   const [apiKey, setApiKey] = useState("");
+  const [keyDecryptWarn, setKeyDecryptWarn] = useState(false);
   const [aiModel, setAiModel] = useState("gemini-2.0-flash");
   const [file, setFile] = useState<File | null>(null);
   const [domain, setDomain] = useState("auto");
@@ -132,7 +135,7 @@ export default function App() {
   const [glossary, setGlossary] = useState<GlossaryEntry[]>([]);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
 
-  // Custom font upload
+  // Custom font
   const [fontFile, setFontFile] = useState<File | null>(null);
   const [fontOpen, setFontOpen] = useState(false);
 
@@ -145,15 +148,17 @@ export default function App() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState({ step: "", done: 0, total: 100, message: "" });
   const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   // Review (HITL)
   const [reviewBlocks, setReviewBlocks] = useState<PDFBlock[]>([]);
   const [reviewEdits, setReviewEdits] = useState<Map<string, string>>(new Map());
   const [reviewPageIdx, setReviewPageIdx] = useState(0);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
   const [finalizing, setFinalizing] = useState(false);
   const [finalizeError, setFinalizeError] = useState<string | null>(null);
 
-  // Side-by-side preview
+  // Side-by-side
   const [showSideBySide, setShowSideBySide] = useState(false);
 
   // General
@@ -166,43 +171,74 @@ export default function App() {
   const esRef = useRef<EventSource | null>(null);
   const progressDoneRef = useRef(false);
 
-  // Load encrypted API key on mount
+  // ---------------------------------------------------------------------------
+  // Load encrypted API key + saved glossary on mount
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    decryptApiKey().then(k => { if (k) setApiKey(k); });
+    // API key
+    const hasCiphertext = Boolean(localStorage.getItem(CRYPTO_DATA_LOCAL));
+    decryptApiKey().then(k => {
+      if (k) { setApiKey(k); }
+      else if (hasCiphertext) { setKeyDecryptWarn(true); } // exists but can't decrypt (new tab)
+    });
+    // Glossary
+    try {
+      const saved = localStorage.getItem(GLOSSARY_LOCAL);
+      if (saved) { const parsed = JSON.parse(saved); if (Array.isArray(parsed)) setGlossary(parsed); }
+    } catch { /* ignore */ }
   }, []);
+
+  // Persist glossary whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem(GLOSSARY_LOCAL, JSON.stringify(glossary)); } catch { /* ignore */ }
+  }, [glossary]);
 
   const persistApiKey = useCallback((key: string) => {
     encryptApiKey(key.trim());
+    if (key.trim()) setKeyDecryptWarn(false);
   }, []);
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Glossary helpers
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   const addGlossaryRow = () =>
     setGlossary(g => [...g, { id: Math.random().toString(36).slice(2), source: "", target: "" }]);
-
   const updateGlossaryRow = (id: string, field: "source" | "target", val: string) =>
     setGlossary(g => g.map(e => e.id === id ? { ...e, [field]: val } : e));
-
   const removeGlossaryRow = (id: string) =>
     setGlossary(g => g.filter(e => e.id !== id));
-
+  const exportGlossary = () => {
+    const obj: Record<string, string> = {};
+    for (const e of glossary) if (e.source.trim() && e.target.trim()) obj[e.source.trim()] = e.target.trim();
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = "thikha_glossary.json"; a.click(); URL.revokeObjectURL(a.href);
+  };
+  const importGlossary = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    f.text().then(text => {
+      try {
+        const obj = JSON.parse(text) as Record<string, string>;
+        const entries: GlossaryEntry[] = Object.entries(obj).map(([s, t]) => ({ id: Math.random().toString(36).slice(2), source: s, target: String(t) }));
+        setGlossary(g => [...g, ...entries]);
+      } catch { alert("Invalid JSON file"); }
+    });
+    e.target.value = "";
+  };
   const buildGlossaryJson = (): string => {
     const obj: Record<string, string> = {};
-    for (const e of glossary) {
-      if (e.source.trim() && e.target.trim()) obj[e.source.trim()] = e.target.trim();
-    }
+    for (const e of glossary) if (e.source.trim() && e.target.trim()) obj[e.source.trim()] = e.target.trim();
     return Object.keys(obj).length ? JSON.stringify(obj) : "";
   };
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Inspect
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   const runInspect = useCallback(async (f: File) => {
     setInspectLoading(true); setInspectError(null); setInspect(null);
     const fd = new FormData(); fd.append("pdf", f);
     try {
-      const res = await fetch(new URL("/api/inspect", window.location.origin), { method: "POST", body: fd });
+      const res = await fetch("/api/inspect", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.details || data.error || "Inspect failed");
       setInspect({ pages: data.pages, size_bytes: data.size_bytes });
@@ -228,23 +264,19 @@ export default function App() {
     } catch { setError("Could not load PDF from URL (often blocked by CORS). Upload the file instead."); }
   };
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Job flow
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   const loadMeta = async (id: string) => {
     try {
-      const res = await fetch(`${window.location.origin}/api/jobs/${id}/meta`);
+      const res = await fetch(`/api/jobs/${id}/meta`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load results");
-      setResult({
-        dimensions: data.dimensions || [],
-        blocks: data.blocks || [],
-        summary: data.summary || { total_pages: 0, total_text_blocks: 0 },
-      });
-      // Go to review screen (HITL)
+      setResult({ dimensions: data.dimensions || [], blocks: data.blocks || [], summary: data.summary || { total_pages: 0, total_text_blocks: 0 } });
       setReviewBlocks(data.blocks || []);
       setReviewEdits(new Map());
       setReviewPageIdx(0);
+      setReviewFilter("all");
       setFinalizeError(null);
       setScreen("review");
     } catch (e) {
@@ -255,7 +287,7 @@ export default function App() {
 
   const subscribeProgress = (id: string) => {
     if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    const es = new EventSource(`${window.location.origin}/api/jobs/${id}/progress`);
+    const es = new EventSource(`/api/jobs/${id}/progress`);
     esRef.current = es;
     es.onmessage = (ev) => {
       try {
@@ -273,7 +305,7 @@ export default function App() {
           return;
         }
         setProgress({ step: data.step || "", done: data.done ?? 0, total: Math.max(1, data.total ?? 100), message: data.message || "" });
-      } catch { /* ignore malformed */ }
+      } catch { /* ignore */ }
     };
     es.onerror = () => es.close();
   };
@@ -310,24 +342,29 @@ export default function App() {
     }
   };
 
-  // -------------------------------------------------------------------------
+  const cancelJob = async () => {
+    if (!jobId) { resetFlow(); return; }
+    setCancelling(true);
+    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    try { await fetch(`/api/jobs/${jobId}`, { method: "DELETE" }); } catch { /* ignore */ }
+    setCancelling(false);
+    resetFlow();
+  };
+
+  // ---------------------------------------------------------------------------
   // HITL Finalize
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   const handleFinalize = async () => {
     if (!jobId) return;
     setFinalizing(true); setFinalizeError(null);
-
-    // Merge edits into blocks
-    const edited = reviewBlocks.map((b, i) => {
-      const key = `${i}`;
-      return reviewEdits.has(key) ? { ...b, myanmar_text: reviewEdits.get(key) } : b;
-    });
-
-    // Only finalize if any edits were made
     const hasEdits = reviewEdits.size > 0;
     if (hasEdits) {
+      const edited = reviewBlocks.map((b, i) => {
+        const key = `${i}`;
+        return reviewEdits.has(key) ? { ...b, myanmar_text: reviewEdits.get(key) } : b;
+      });
       try {
-        const res = await fetch(`${window.location.origin}/api/jobs/${jobId}/finalize`, {
+        const res = await fetch(`/api/jobs/${jobId}/finalize`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ blocks: edited }),
@@ -348,7 +385,7 @@ export default function App() {
     if (!jobId || !file) return;
     setDownloading(true); setDownloadError(null);
     try {
-      const res = await fetch(`${window.location.origin}/api/jobs/${jobId}/download`);
+      const res = await fetch(`/api/jobs/${jobId}/download`);
       if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || err.details || `Download failed (${res.status})`); }
       const blob = await res.blob();
       const a = document.createElement("a");
@@ -366,32 +403,53 @@ export default function App() {
     setScreen("upload"); setFile(null); setResult(null); setJobId(null);
     setInspect(null); setError(null); setDownloadError(null); setPdfUrl("");
     setReviewBlocks([]); setReviewEdits(new Map()); setFinalizeError(null);
-    setShowSideBySide(false);
+    setShowSideBySide(false); setReviewFilter("all"); setCancelling(false);
   };
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Derived
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   const pct = progress.total > 0 ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
   const stepLabel = (() => {
     const s = progress.step;
-    if (s === "extract") return "Step 1: Extract structure";
-    if (s === "detect")  return "Step 2: Domain detection";
-    if (s === "translate") return "Step 3: Translating blocks";
-    if (s === "write")   return "Step 4: Building PDF";
-    if (s === "verify")  return "Step 5: Verifying output";
+    if (s === "extract")  return "Step 1 — Extract structure";
+    if (s === "detect")   return "Step 2 — Domain detection";
+    if (s === "translate") return "Step 3 — Translating blocks";
+    if (s === "write")    return "Step 4 — Building PDF";
+    if (s === "verify")   return "Step 5 — Verifying output";
     if (s === "complete") return "Complete";
-    return progress.message || "Working…";
+    return progress.message || "Starting…";
   })();
 
-  const reviewTotalPages = Math.ceil(reviewBlocks.length / REVIEW_PAGE_SIZE);
-  const reviewPageBlocks = reviewBlocks.slice(reviewPageIdx * REVIEW_PAGE_SIZE, (reviewPageIdx + 1) * REVIEW_PAGE_SIZE);
-  const editedCount = reviewEdits.size;
   const currentModelMeta = AI_MODELS.find(m => m.value === aiModel);
 
-  // -------------------------------------------------------------------------
+  // Review filtering
+  const filteredBlocks = reviewBlocks.filter((b, i) => {
+    if (reviewFilter === "edited")     return reviewEdits.has(`${i}`);
+    if (reviewFilter === "translated") return !!b.myanmar_text && !reviewEdits.has(`${i}`);
+    if (reviewFilter === "skipped")    return !b.myanmar_text && !reviewEdits.has(`${i}`);
+    return true;
+  });
+  const reviewTotalPages = Math.ceil(filteredBlocks.length / REVIEW_PAGE_SIZE);
+  const reviewPageBlocks = filteredBlocks.slice(reviewPageIdx * REVIEW_PAGE_SIZE, (reviewPageIdx + 1) * REVIEW_PAGE_SIZE);
+  const editedCount = reviewEdits.size;
+
+  const translatedCount = reviewBlocks.filter(b => !!b.myanmar_text).length;
+  const skippedCount = reviewBlocks.length - translatedCount;
+
+  // Filter tab counts
+  const filterCounts: Record<ReviewFilter, number> = {
+    all:        reviewBlocks.length,
+    translated: reviewBlocks.filter((b, i) => !!b.myanmar_text && !reviewEdits.has(`${i}`)).length,
+    edited:     editedCount,
+    skipped:    reviewBlocks.filter((b, i) => !b.myanmar_text && !reviewEdits.has(`${i}`)).length,
+  };
+
+  const glossaryTermCount = glossary.filter(e => e.source.trim() && e.target.trim()).length;
+
+  // ---------------------------------------------------------------------------
   // Render
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans selection:bg-blue-100 selection:text-blue-900">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
@@ -404,8 +462,14 @@ export default function App() {
           </div>
           {result && (screen === "result" || screen === "review") && (
             <div className="flex gap-4 text-sm font-medium text-gray-500">
-              <div className="flex items-center gap-1"><FileText className="w-4 h-4" /><span>{result.summary.total_pages} Pages</span></div>
-              <div className="flex items-center gap-1"><Type className="w-4 h-4" /><span>{result.summary.total_text_blocks} Blocks</span></div>
+              <span className="flex items-center gap-1"><FileText className="w-4 h-4" />{result.summary.total_pages} pages</span>
+              <span className="flex items-center gap-1"><Type className="w-4 h-4" />{result.summary.total_text_blocks} blocks</span>
+              {result.summary.translated_blocks != null && (
+                <span className="flex items-center gap-1 text-green-600 font-semibold">
+                  <CheckCircle2 className="w-4 h-4" />
+                  {Math.round((result.summary.translated_blocks / Math.max(1, result.summary.total_text_blocks)) * 100)}% translated
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -461,7 +525,7 @@ export default function App() {
                   <input type="url" value={pdfUrl} onChange={(e) => setPdfUrl(e.target.value)} placeholder="https://…/document.pdf" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-blue-500" />
                   <button type="button" onClick={() => void tryLoadPdfFromUrl()} className="px-3 py-2 text-sm font-medium bg-gray-100 rounded-lg hover:bg-gray-200">Load</button>
                 </div>
-                <p className="text-[11px] text-gray-400">Many sites block cross-origin downloads; uploading a local file is most reliable.</p>
+                <p className="text-[11px] text-gray-400">Many sites block cross-origin downloads — uploading a local file is most reliable.</p>
               </div>
 
               {/* AI Model + API Key + Domain + Pages */}
@@ -487,17 +551,23 @@ export default function App() {
                     <div className="flex items-center gap-1.5 text-sm font-semibold text-gray-800">
                       <KeyRound className="w-4 h-4 text-blue-600" />
                       {currentModelMeta?.provider ?? "AI"} API Key
-                      <Lock className="w-3 h-3 text-gray-400" title="Encrypted with AES-GCM in localStorage" />
+                      <Lock className="w-3 h-3 text-gray-400" title="AES-GCM encrypted in localStorage" />
                     </div>
                     <a href={currentModelMeta?.keyLink} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-500 hover:underline">Get key ↗</a>
                   </div>
+                  {keyDecryptWarn && (
+                    <div className="mb-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                      <p className="text-[11px] text-amber-700">A saved API key was found but can't be decrypted in this browser tab (encryption key is tab-scoped). Please re-enter your key.</p>
+                    </div>
+                  )}
                   <input
                     type="password" autoComplete="off" value={apiKey}
                     onChange={(e) => { setApiKey(e.target.value); persistApiKey(e.target.value); }}
-                    placeholder="Paste your API key (AES-encrypted locally)"
+                    placeholder="Paste your API key"
                     className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                   />
-                  <p className="text-[11px] text-gray-400 mt-1">Encrypted locally (AES-GCM) — sent only to your local server.</p>
+                  <p className="text-[11px] text-gray-400 mt-1">Encrypted locally (AES-GCM) — never sent to any third party.</p>
                 </div>
 
                 {/* Domain + Pages */}
@@ -522,17 +592,11 @@ export default function App() {
 
               {/* Custom Glossary */}
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <button type="button" onClick={() => setGlossaryOpen(o => !o)}
-                  className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors"
-                >
+                <button type="button" onClick={() => setGlossaryOpen(o => !o)} className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors">
                   <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
                     <BookOpen className="w-4 h-4 text-purple-500" />
                     Custom Glossary
-                    {glossary.filter(e => e.source.trim() && e.target.trim()).length > 0 && (
-                      <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 font-medium">
-                        {glossary.filter(e => e.source.trim() && e.target.trim()).length} terms
-                      </span>
-                    )}
+                    {glossaryTermCount > 0 && <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 font-medium">{glossaryTermCount} terms</span>}
                   </div>
                   {glossaryOpen ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
                 </button>
@@ -540,26 +604,31 @@ export default function App() {
                   {glossaryOpen && (
                     <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                       <div className="px-5 pb-4 space-y-3 border-t border-gray-100">
-                        <p className="text-[11px] text-gray-400 pt-3">Define exact translations for specific terms. The AI will always use these.</p>
+                        <p className="text-[11px] text-gray-400 pt-3">Define exact translations. Persisted across sessions. <span className="text-purple-500 font-medium">Auto-saved to browser.</span></p>
                         {glossary.map((entry) => (
                           <div key={entry.id} className="flex gap-2 items-center">
-                            <input
-                              value={entry.source} onChange={(e) => updateGlossaryRow(entry.id, "source", e.target.value)}
-                              placeholder="Source term (e.g. Server)"
-                              className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400"
-                            />
+                            <input value={entry.source} onChange={(e) => updateGlossaryRow(entry.id, "source", e.target.value)} placeholder="Source term" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400" />
                             <span className="text-gray-400 text-sm font-medium shrink-0">→</span>
-                            <input
-                              value={entry.target} onChange={(e) => updateGlossaryRow(entry.id, "target", e.target.value)}
-                              placeholder="Myanmar (e.g. ဆာဗာ)"
-                              className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400"
-                            />
+                            <input value={entry.target} onChange={(e) => updateGlossaryRow(entry.id, "target", e.target.value)} placeholder="Myanmar translation" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400" />
                             <button type="button" onClick={() => removeGlossaryRow(entry.id)} className="shrink-0 text-gray-300 hover:text-red-500 transition-colors"><Trash2 className="w-4 h-4" /></button>
                           </div>
                         ))}
-                        <button type="button" onClick={addGlossaryRow} className="flex items-center gap-1.5 text-sm text-purple-600 hover:text-purple-700 font-medium">
-                          <Plus className="w-4 h-4" /> Add term
-                        </button>
+                        <div className="flex gap-2 pt-1">
+                          <button type="button" onClick={addGlossaryRow} className="flex items-center gap-1.5 text-sm text-purple-600 hover:text-purple-700 font-medium">
+                            <Plus className="w-4 h-4" /> Add term
+                          </button>
+                          {glossaryTermCount > 0 && (
+                            <>
+                              <span className="text-gray-300">·</span>
+                              <button type="button" onClick={exportGlossary} className="text-sm text-gray-500 hover:text-gray-700">Export JSON</button>
+                            </>
+                          )}
+                          <span className="text-gray-300">·</span>
+                          <label className="text-sm text-gray-500 hover:text-gray-700 cursor-pointer">
+                            Import JSON
+                            <input type="file" accept=".json" className="hidden" onChange={importGlossary} />
+                          </label>
+                        </div>
                       </div>
                     </motion.div>
                   )}
@@ -568,9 +637,7 @@ export default function App() {
 
               {/* Custom Font Upload */}
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <button type="button" onClick={() => setFontOpen(o => !o)}
-                  className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors"
-                >
+                <button type="button" onClick={() => setFontOpen(o => !o)} className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors">
                   <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
                     <Upload className="w-4 h-4 text-amber-500" />
                     Custom Myanmar Font
@@ -582,20 +649,14 @@ export default function App() {
                   {fontOpen && (
                     <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
                       <div className="px-5 pb-4 border-t border-gray-100 pt-3 space-y-3">
-                        <p className="text-[11px] text-gray-400">Upload a Myanmar .ttf font (Padauk, Myanmar Text, etc.). Leave blank to use the default Pyidaungsu font.</p>
+                        <p className="text-[11px] text-gray-400">Upload any Myanmar .ttf font (Padauk, Myanmar Text, etc.). Default: Pyidaungsu.</p>
                         <div className="flex gap-2 items-center">
-                          <button type="button" onClick={() => fontInputRef.current?.click()}
-                            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-amber-50 border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-100 transition-colors"
-                          >
+                          <button type="button" onClick={() => fontInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-amber-50 border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-100 transition-colors">
                             <Upload className="w-4 h-4" />
                             {fontFile ? "Change font" : "Choose .ttf font"}
                           </button>
-                          {fontFile && (
-                            <button type="button" onClick={() => setFontFile(null)} className="text-xs text-gray-400 hover:text-red-500">Remove</button>
-                          )}
-                          <input type="file" ref={fontInputRef} accept=".ttf,.otf" className="hidden"
-                            onChange={(e) => { const f = e.target.files?.[0]; if (f) setFontFile(f); }}
-                          />
+                          {fontFile && <button type="button" onClick={() => setFontFile(null)} className="text-xs text-gray-400 hover:text-red-500">Remove</button>}
+                          <input type="file" ref={fontInputRef} accept=".ttf,.otf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) setFontFile(f); }} />
                         </div>
                         {fontFile && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-3 py-1.5">{fontFile.name} ({formatBytes(fontFile.size)})</p>}
                       </div>
@@ -629,6 +690,11 @@ export default function App() {
                   <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
                   <p className="text-lg font-semibold text-gray-900">{stepLabel}</p>
                   <p className="text-sm text-gray-500 mt-1">{progress.message}</p>
+                  <p className="text-xs text-gray-400 mt-2 flex items-center gap-1">
+                    Using <span className="font-medium text-blue-600">{currentModelMeta?.label ?? aiModel}</span>
+                    {currentModelMeta && <span className="text-gray-300">·</span>}
+                    {currentModelMeta && <span>{currentModelMeta.provider}</span>}
+                  </p>
                 </div>
                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                   <div className="h-full bg-blue-600 transition-all duration-300 rounded-full" style={{ width: `${pct}%` }} />
@@ -637,6 +703,14 @@ export default function App() {
                 {progress.step === "translate" && (
                   <p className="text-center text-[11px] text-gray-400 mt-3">Large PDFs may take several minutes…</p>
                 )}
+                <div className="mt-6 flex justify-center">
+                  <button type="button" onClick={() => void cancelJob()} disabled={cancelling}
+                    className="flex items-center gap-2 px-4 py-2 text-sm text-gray-500 border border-gray-200 rounded-lg hover:bg-red-50 hover:text-red-600 hover:border-red-200 disabled:opacity-50 transition-colors"
+                  >
+                    {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+                    {cancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                </div>
               </div>
             </motion.div>
           )}
@@ -646,7 +720,7 @@ export default function App() {
           {/* ================================================================ */}
           {screen === "review" && (
             <motion.div key="review" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="max-w-5xl mx-auto space-y-5">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
                     <Pencil className="w-5 h-5 text-blue-600" />
@@ -654,17 +728,24 @@ export default function App() {
                   </h2>
                   <p className="text-sm text-gray-500 mt-0.5">
                     {reviewBlocks.length} blocks · {result?.summary.total_pages} pages
-                    {editedCount > 0 && <span className="ml-2 text-blue-600 font-medium">· {editedCount} edited</span>}
+                    · <span className="text-green-600 font-medium">{translatedCount} translated</span>
+                    {skippedCount > 0 && <span className="text-gray-400"> · {skippedCount} skipped</span>}
+                    {editedCount > 0 && <span className="text-blue-600 font-medium"> · {editedCount} edited</span>}
                   </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button type="button" onClick={resetFlow} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
                     Start Over
+                  </button>
+                  <button type="button" onClick={() => { setShowSideBySide(false); setScreen("result"); }}
+                    className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    <SkipForward className="w-4 h-4" /> Skip Review
                   </button>
                   <button type="button" onClick={() => void handleFinalize()} disabled={finalizing}
                     className="px-5 py-2 text-sm font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2 transition-colors"
                   >
-                    {finalizing ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</> : <><CheckCircle2 className="w-4 h-4" /> {editedCount > 0 ? "Apply Edits & Export" : "Export PDF"}</>}
+                    {finalizing ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</> : <><Save className="w-4 h-4" /> {editedCount > 0 ? "Apply Edits & Export" : "Export PDF"}</>}
                   </button>
                 </div>
               </div>
@@ -676,60 +757,84 @@ export default function App() {
                 </div>
               )}
 
+              {/* Filter tabs */}
+              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
+                {(["all", "translated", "edited", "skipped"] as ReviewFilter[]).map((f) => (
+                  <button key={f} type="button"
+                    onClick={() => { setReviewFilter(f); setReviewPageIdx(0); }}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${reviewFilter === f ? "bg-blue-600 text-white" : "text-gray-500 hover:bg-gray-100"}`}
+                  >
+                    <Filter className="w-3 h-3" />
+                    {f.charAt(0).toUpperCase() + f.slice(1)}
+                    <span className={`rounded-full px-1.5 text-[10px] font-bold ${reviewFilter === f ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-500"}`}>
+                      {filterCounts[f]}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
               {/* Blocks table */}
               <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-gray-50 border-b border-gray-200 text-left">
-                        <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-12">Pg</th>
-                        <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-1/2">Original Text</th>
-                        <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider">Myanmar Translation</th>
-                        <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-16">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {reviewPageBlocks.map((block, localIdx) => {
-                        const globalIdx = reviewPageIdx * REVIEW_PAGE_SIZE + localIdx;
-                        const key = `${globalIdx}`;
-                        const currentTranslation = reviewEdits.has(key) ? reviewEdits.get(key)! : (block.myanmar_text ?? "");
-                        const isEdited = reviewEdits.has(key);
-                        const hasTranslation = !!block.myanmar_text;
-                        return (
-                          <tr key={`${block.page_number}-${block.block_index}`} className={isEdited ? "bg-blue-50/40" : ""}>
-                            <td className="px-4 py-3 text-xs text-gray-400 font-mono align-top">{block.page_number}</td>
-                            <td className="px-4 py-3 align-top">
-                              <p className="text-gray-700 text-xs leading-relaxed line-clamp-3">{block.text}</p>
-                            </td>
-                            <td className="px-4 py-3 align-top">
-                              <textarea
-                                value={currentTranslation}
-                                onChange={(e) => {
-                                  const newMap = new Map(reviewEdits);
-                                  if (e.target.value === (block.myanmar_text ?? "")) newMap.delete(key);
-                                  else newMap.set(key, e.target.value);
-                                  setReviewEdits(newMap);
-                                }}
-                                rows={2}
-                                placeholder="No translation"
-                                className={`w-full text-xs border rounded-lg px-2 py-1.5 outline-none resize-y font-sans leading-relaxed transition-colors ${isEdited ? "border-blue-300 bg-white focus:ring-1 focus:ring-blue-400" : "border-gray-200 bg-gray-50 focus:border-blue-300 focus:bg-white focus:ring-1 focus:ring-blue-300"}`}
-                              />
-                            </td>
-                            <td className="px-4 py-3 align-top">
-                              {isEdited ? (
-                                <span className="inline-block text-[10px] bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 font-medium">Edited</span>
-                              ) : hasTranslation ? (
-                                <span className="inline-block text-[10px] bg-green-100 text-green-700 rounded-full px-2 py-0.5 font-medium">Done</span>
-                              ) : (
-                                <span className="inline-block text-[10px] bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">Skipped</span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                {reviewPageBlocks.length === 0 ? (
+                  <div className="p-12 text-center text-gray-400">
+                    <Filter className="w-8 h-8 mx-auto mb-3 opacity-30" />
+                    <p className="text-sm">No blocks in this filter.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200 text-left">
+                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-12">Pg</th>
+                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-1/2">Original Text</th>
+                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider">Myanmar Translation</th>
+                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-16">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {reviewPageBlocks.map((block) => {
+                          // Find global index
+                          const globalIdx = reviewBlocks.indexOf(block);
+                          const key = `${globalIdx}`;
+                          const currentTranslation = reviewEdits.has(key) ? reviewEdits.get(key)! : (block.myanmar_text ?? "");
+                          const isEdited = reviewEdits.has(key);
+                          const hasTranslation = !!block.myanmar_text;
+                          return (
+                            <tr key={`${block.page_number}-${block.block_index}-${globalIdx}`} className={isEdited ? "bg-blue-50/40" : ""}>
+                              <td className="px-4 py-3 text-xs text-gray-400 font-mono align-top">{block.page_number}</td>
+                              <td className="px-4 py-3 align-top">
+                                <p className="text-gray-700 text-xs leading-relaxed line-clamp-3">{block.text}</p>
+                              </td>
+                              <td className="px-4 py-3 align-top">
+                                <textarea
+                                  value={currentTranslation}
+                                  onChange={(e) => {
+                                    const newMap = new Map(reviewEdits);
+                                    if (e.target.value === (block.myanmar_text ?? "")) newMap.delete(key);
+                                    else newMap.set(key, e.target.value);
+                                    setReviewEdits(newMap);
+                                  }}
+                                  rows={2}
+                                  placeholder="No translation"
+                                  className={`w-full text-xs border rounded-lg px-2 py-1.5 outline-none resize-y font-sans leading-relaxed transition-colors ${isEdited ? "border-blue-300 bg-white focus:ring-1 focus:ring-blue-400" : "border-gray-200 bg-gray-50 focus:border-blue-300 focus:bg-white focus:ring-1 focus:ring-blue-300"}`}
+                                />
+                              </td>
+                              <td className="px-4 py-3 align-top">
+                                {isEdited ? (
+                                  <span className="inline-block text-[10px] bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 font-medium">Edited</span>
+                                ) : hasTranslation ? (
+                                  <span className="inline-block text-[10px] bg-green-100 text-green-700 rounded-full px-2 py-0.5 font-medium">Done</span>
+                                ) : (
+                                  <span className="inline-block text-[10px] bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">Skipped</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* Pagination */}
@@ -741,7 +846,7 @@ export default function App() {
                     <ArrowLeft className="w-4 h-4" /> Previous
                   </button>
                   <span className="text-sm text-gray-500">
-                    Page {reviewPageIdx + 1} of {reviewTotalPages} · blocks {reviewPageIdx * REVIEW_PAGE_SIZE + 1}–{Math.min((reviewPageIdx + 1) * REVIEW_PAGE_SIZE, reviewBlocks.length)}
+                    Page {reviewPageIdx + 1} of {reviewTotalPages}
                   </span>
                   <button type="button" onClick={() => setReviewPageIdx(p => Math.min(reviewTotalPages - 1, p + 1))} disabled={reviewPageIdx >= reviewTotalPages - 1}
                     className="flex items-center gap-1 px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
@@ -770,16 +875,17 @@ export default function App() {
                     <p className="text-sm text-gray-500">
                       {result.summary.translated_blocks ?? 0} of {result.summary.total_text_blocks} blocks translated
                       {result.summary.domain && ` · domain: ${result.summary.domain}`}
+                      {result.summary.elapsed_seconds && ` · ${result.summary.elapsed_seconds}s`}
                     </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
                   {[
-                    { label: "Pages", value: result.summary.total_pages },
-                    { label: "Blocks", value: result.summary.total_text_blocks },
+                    { label: "Pages",      value: result.summary.total_pages },
+                    { label: "Blocks",     value: result.summary.total_text_blocks },
                     { label: "Translated", value: result.summary.translated_blocks ?? 0 },
-                    { label: "Time", value: result.summary.elapsed_seconds ? `${result.summary.elapsed_seconds}s` : "—" },
+                    { label: "Quality",    value: `${Math.round(((result.summary.translated_blocks ?? 0) / Math.max(1, result.summary.total_text_blocks)) * 100)}%` },
                   ].map((stat) => (
                     <div key={stat.label} className="bg-gray-50 rounded-xl p-3 text-center">
                       <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
@@ -795,7 +901,7 @@ export default function App() {
                   >
                     {downloading ? <><Loader2 className="w-5 h-5 animate-spin" /> Downloading…</> : <><Download className="w-5 h-5" /> Download PDF</>}
                   </button>
-                  <button type="button" onClick={() => { setScreen("review"); }} disabled={!jobId}
+                  <button type="button" onClick={() => setScreen("review")} disabled={!jobId}
                     className="flex items-center gap-2 px-5 py-3 border border-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-50 disabled:opacity-40 transition-colors"
                   >
                     <Pencil className="w-4 h-4" /> Back to Review
@@ -815,8 +921,7 @@ export default function App() {
 
                 {downloadError && (
                   <div className="mt-4 bg-red-50 border border-red-100 p-3 rounded-lg flex gap-2 text-red-700 text-sm">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    <p>{downloadError}</p>
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><p>{downloadError}</p>
                   </div>
                 )}
               </div>
@@ -831,30 +936,32 @@ export default function App() {
                           <SplitSquareHorizontal className="w-4 h-4 text-blue-500" />
                           Side-by-Side Preview
                         </div>
-                        <p className="text-[11px] text-gray-400">Scroll each panel independently</p>
+                        <p className="text-[11px] text-gray-400">If PDF does not appear, use the open link below each panel.</p>
                       </div>
-                      <div className="grid grid-cols-2 divide-x divide-gray-200" style={{ height: "80vh" }}>
+                      <div className="grid grid-cols-2 divide-x divide-gray-200" style={{ height: "75vh" }}>
                         <div className="flex flex-col">
-                          <div className="bg-gray-50 px-4 py-2 border-b border-gray-100 flex items-center gap-2">
-                            <Eye className="w-3.5 h-3.5 text-gray-400" />
-                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Original</span>
+                          <div className="bg-gray-50 px-4 py-2 border-b border-gray-100 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <Eye className="w-3.5 h-3.5 text-gray-400" />
+                              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Original</span>
+                            </div>
+                            <a href={`/api/jobs/${jobId}/original`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[11px] text-blue-500 hover:underline">
+                              <ExternalLink className="w-3 h-3" /> Open
+                            </a>
                           </div>
-                          <iframe
-                            src={`/api/jobs/${jobId}/original`}
-                            title="Original PDF"
-                            className="flex-1 w-full border-0"
-                          />
+                          <iframe src={`/api/jobs/${jobId}/original`} title="Original PDF" className="flex-1 w-full border-0" />
                         </div>
                         <div className="flex flex-col">
-                          <div className="bg-blue-50 px-4 py-2 border-b border-blue-100 flex items-center gap-2">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" />
-                            <span className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Translated</span>
+                          <div className="bg-blue-50 px-4 py-2 border-b border-blue-100 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" />
+                              <span className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Translated</span>
+                            </div>
+                            <a href={`/api/jobs/${jobId}/preview`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[11px] text-blue-500 hover:underline">
+                              <ExternalLink className="w-3 h-3" /> Open
+                            </a>
                           </div>
-                          <iframe
-                            src={`/api/jobs/${jobId}/preview`}
-                            title="Translated PDF"
-                            className="flex-1 w-full border-0"
-                          />
+                          <iframe src={`/api/jobs/${jobId}/preview`} title="Translated PDF" className="flex-1 w-full border-0" />
                         </div>
                       </div>
                     </div>
@@ -882,15 +989,9 @@ export default function App() {
                         {result.blocks.slice(0, 50).map((b, i) => (
                           <tr key={i} className="hover:bg-gray-50/50">
                             <td className="px-4 py-2.5 text-xs text-gray-400 font-mono align-top">{b.page_number}</td>
-                            <td className="px-4 py-2.5 text-xs text-gray-600 align-top max-w-[200px]">
-                              <span className="line-clamp-2">{b.text}</span>
-                            </td>
+                            <td className="px-4 py-2.5 text-xs text-gray-600 align-top max-w-[200px]"><span className="line-clamp-2">{b.text}</span></td>
                             <td className="px-4 py-2.5 text-xs align-top max-w-[200px]">
-                              {b.myanmar_text ? (
-                                <span className="text-gray-800 line-clamp-2">{b.myanmar_text}</span>
-                              ) : (
-                                <span className="text-gray-300 italic">—</span>
-                              )}
+                              {b.myanmar_text ? <span className="text-gray-800 line-clamp-2">{b.myanmar_text}</span> : <span className="text-gray-300 italic">—</span>}
                             </td>
                           </tr>
                         ))}

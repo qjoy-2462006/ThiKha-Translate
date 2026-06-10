@@ -112,6 +112,7 @@ interface JobRecord {
   blocksPath?: string;
   summary?: Record<string, unknown>;
   listeners: Set<(payload: object) => void>;
+  proc?: ChildProcess;
 }
 
 const jobs = new Map<string, JobRecord>();
@@ -136,12 +137,14 @@ function runPython(
   scriptPath: string,
   args: string[],
   extraEnv: Record<string, string> = {},
-  onStderrLine?: (line: string) => void
+  onStderrLine?: (line: string) => void,
+  onProcess?: (proc: ChildProcess) => void,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, ...extraEnv };
     const { exe, argsPrefix } = resolvePythonCmd();
     const proc: ChildProcess = spawn(exe, [...argsPrefix, scriptPath, ...args], { env });
+    if (onProcess) onProcess(proc);
 
     let stdout = "", stderr = "", stderrBuf = "";
     const timer = setTimeout(() => { proc.kill("SIGTERM"); reject(new Error("Timed out — try a smaller page range")); }, PYTHON_TIMEOUT_MS);
@@ -436,7 +439,7 @@ async function startServer() {
         if (glossaryRaw) pythonArgs.push("--glossary", glossaryRaw);
 
         try {
-          await runPython(PYTHON_TRANSLATE, pythonArgs, { GEMINI_API_KEY: apiKey }, onStderrLine);
+          await runPython(PYTHON_TRANSLATE, pythonArgs, { GEMINI_API_KEY: apiKey }, onStderrLine, (p) => { job.proc = p; });
 
           if (!fs.existsSync(outputPath)) throw new Error("Output PDF was not created");
 
@@ -460,6 +463,20 @@ async function startServer() {
         // NOTE: do NOT delete inputPath here — needed for side-by-side preview + HITL finalize
       })();
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // DELETE /api/jobs/:id — cancel job
+  // -------------------------------------------------------------------------
+  app.delete("/api/jobs/:id", (req, res) => {
+    const job = jobs.get(req.params.id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    if (job.proc) {
+      try { job.proc.kill("SIGTERM"); } catch { /* ignore */ }
+      job.proc = undefined;
+    }
+    cleanupJob(job);
+    res.json({ ok: true });
   });
 
   // -------------------------------------------------------------------------

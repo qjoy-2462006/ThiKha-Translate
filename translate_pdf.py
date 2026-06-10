@@ -409,6 +409,7 @@ def extract_pdf_blocks(pdf_path: str, page_range: str = "all", api_key: str = No
                     "text": full_text,
                     "font_size": round(sum(sizes) / len(sizes), 2) if sizes else 10.0,
                     "font_name": next(iter(fonts), "Helvetica"),
+                    "block_type": 0,
                     "is_bold": any(bolds),
                     "color": next(iter(colors), 0),
                 })
@@ -657,7 +658,8 @@ def write_myanmar_pdf(
     doc.close()
 
     if overflow_count:
-        with open("overflow_report.txt", "w", encoding="utf-8") as f:
+        report_path = os.path.splitext(output_path)[0] + "_overflow.txt"
+        with open(report_path, "w", encoding="utf-8") as f:
             f.write("\n".join(report_lines))
 
     return {
