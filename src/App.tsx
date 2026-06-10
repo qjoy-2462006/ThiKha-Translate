@@ -1,22 +1,19 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
-  FileUp, FileText, Layout, Type, Info, Loader2,
-  CheckCircle2, AlertCircle, Download, KeyRound, Plus, Trash2,
-  BookOpen, ChevronDown, ChevronUp, Upload, Pencil, Eye,
-  SplitSquareHorizontal, ArrowLeft, ArrowRight, Lock, X,
-  ExternalLink, Filter, SkipForward, Save,
+  FileUp, Loader2, CheckCircle2, AlertCircle, Download,
+  KeyRound, Plus, Trash2, BookOpen, Upload, Pencil,
+  SplitSquareHorizontal, ArrowLeft, ArrowRight, X,
+  ExternalLink, SkipForward, ChevronRight, ChevronDown,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-const API_KEY_HEADER = "x-gemini-api-key";
-const CRYPTO_KEY_SESSION = "thikha_enc_key";
-const CRYPTO_DATA_LOCAL  = "thikha_enc_data_v2";
-const GLOSSARY_LOCAL     = "thikha_glossary_v1";
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const API_KEY_HEADER   = "x-gemini-api-key";
+const CRYPTO_KEY_SESS  = "thikha_enc_key";
+const CRYPTO_DATA_LOC  = "thikha_enc_data_v2";
+const GLOSSARY_LOC     = "thikha_glossary_v1";
 
 const AI_MODELS = [
   { value: "gemini-2.0-flash",           label: "Gemini 2.0 Flash",    provider: "Google",    keyLink: "https://aistudio.google.com/apikey" },
@@ -28,45 +25,33 @@ const AI_MODELS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Web Crypto — AES-GCM encrypted API key storage
+// Crypto
 // ---------------------------------------------------------------------------
-
-async function _getOrCreateEncKey(): Promise<CryptoKey | null> {
+async function _encKey(): Promise<CryptoKey | null> {
   try {
-    const stored = sessionStorage.getItem(CRYPTO_KEY_SESSION);
-    if (stored) {
-      const raw = Uint8Array.from(atob(stored), c => c.charCodeAt(0));
-      return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
-    }
-    const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-    const raw = new Uint8Array(await crypto.subtle.exportKey("raw", key));
-    sessionStorage.setItem(CRYPTO_KEY_SESSION, btoa(String.fromCharCode(...raw)));
-    return key;
+    const s = sessionStorage.getItem(CRYPTO_KEY_SESS);
+    if (s) return crypto.subtle.importKey("raw", Uint8Array.from(atob(s), c => c.charCodeAt(0)), "AES-GCM", false, ["encrypt","decrypt"]);
+    const k = await crypto.subtle.generateKey({ name:"AES-GCM", length:256 }, true, ["encrypt","decrypt"]);
+    const raw = new Uint8Array(await crypto.subtle.exportKey("raw", k));
+    sessionStorage.setItem(CRYPTO_KEY_SESS, btoa(String.fromCharCode(...raw)));
+    return k;
   } catch { return null; }
 }
-
-async function encryptApiKey(value: string): Promise<void> {
+async function encryptKey(v: string) {
   try {
-    if (!value.trim()) { localStorage.removeItem(CRYPTO_DATA_LOCAL); return; }
-    const key = await _getOrCreateEncKey();
-    if (!key) return;
+    if (!v.trim()) { localStorage.removeItem(CRYPTO_DATA_LOC); return; }
+    const k = await _encKey(); if (!k) return;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const enc = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(value));
-    const payload = JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), ct: btoa(String.fromCharCode(...new Uint8Array(enc))) });
-    localStorage.setItem(CRYPTO_DATA_LOCAL, payload);
-  } catch { /* ignore */ }
+    const ct = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, k, new TextEncoder().encode(v));
+    localStorage.setItem(CRYPTO_DATA_LOC, JSON.stringify({ iv: btoa(String.fromCharCode(...iv)), ct: btoa(String.fromCharCode(...new Uint8Array(ct))) }));
+  } catch {}
 }
-
-async function decryptApiKey(): Promise<string | null> {
+async function decryptKey(): Promise<string | null> {
   try {
-    const stored = localStorage.getItem(CRYPTO_DATA_LOCAL);
-    if (!stored) return null;
-    const { iv, ct } = JSON.parse(stored) as { iv: string; ct: string };
-    const key = await _getOrCreateEncKey();
-    if (!key) return null;
-    const ivArr = Uint8Array.from(atob(iv), c => c.charCodeAt(0));
-    const ctArr = Uint8Array.from(atob(ct), c => c.charCodeAt(0));
-    const dec = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivArr }, key, ctArr);
+    const s = localStorage.getItem(CRYPTO_DATA_LOC); if (!s) return null;
+    const { iv, ct } = JSON.parse(s) as { iv: string; ct: string };
+    const k = await _encKey(); if (!k) return null;
+    const dec = await crypto.subtle.decrypt({ name:"AES-GCM", iv: Uint8Array.from(atob(iv), c => c.charCodeAt(0)) }, k, Uint8Array.from(atob(ct), c => c.charCodeAt(0)));
     return new TextDecoder().decode(dec);
   } catch { return null; }
 }
@@ -74,238 +59,146 @@ async function decryptApiKey(): Promise<string | null> {
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
 interface PDFBlock {
-  page_number: number;
-  block_index: number;
-  bbox: [number, number, number, number];
-  text: string;
-  myanmar_text?: string | null;
-  font_size: number;
-  font_name: string;
-  block_type?: number;
-  is_bold: boolean;
-  color: number;
+  page_number: number; block_index: number;
+  bbox: [number,number,number,number]; text: string;
+  myanmar_text?: string | null; font_size: number;
+  font_name: string; block_type?: number; is_bold: boolean; color: number;
 }
-
-interface ExtractionResult {
-  dimensions: Array<{ page_number: number; width: number; height: number }>;
-  blocks: PDFBlock[];
-  summary: {
-    total_pages: number;
-    total_text_blocks: number;
-    translated_blocks?: number;
-    overflow_count?: number;
-    skipped_count?: number;
-    domain?: string;
-    elapsed_seconds?: number;
-  };
+interface Summary {
+  total_pages: number; total_text_blocks: number;
+  translated_blocks?: number; overflow_count?: number;
+  skipped_count?: number; domain?: string; elapsed_seconds?: number;
 }
-
+interface JobResult { dimensions: unknown[]; blocks: PDFBlock[]; summary: Summary }
 type Screen = "upload" | "progress" | "review" | "result";
 type ReviewFilter = "all" | "translated" | "skipped" | "edited";
-
-interface InspectInfo { pages: number; size_bytes: number }
-interface ProgressPayload { status?: string; step?: string; done?: number; total?: number; message?: string; domain?: string; error?: string; event?: string }
 interface GlossaryEntry { id: string; source: string; target: string }
 
-function formatBytes(n: number): string {
+function fmt(n: number) {
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n < 1048576) return `${(n/1024).toFixed(1)} KB`;
+  return `${(n/1048576).toFixed(1)} MB`;
 }
+const RPAGE = 25;
 
-const REVIEW_PAGE_SIZE = 25;
+// ---------------------------------------------------------------------------
+// Shared input styles
+// ---------------------------------------------------------------------------
+const inp = "w-full text-sm bg-zinc-50 border border-zinc-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white transition-colors";
+const lbl = "block text-xs font-medium text-zinc-500 mb-1";
 
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
-
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("upload");
-  const [apiKey, setApiKey] = useState("");
-  const [keyDecryptWarn, setKeyDecryptWarn] = useState(false);
-  const [aiModel, setAiModel] = useState("gemini-2.0-flash");
-  const [file, setFile] = useState<File | null>(null);
-  const [domain, setDomain] = useState("auto");
-  const [pages, setPages] = useState("all");
-  const [pdfUrl, setPdfUrl] = useState("");
+  const [screen, setScreen]       = useState<Screen>("upload");
+  const [apiKey, setApiKey]       = useState("");
+  const [keyWarn, setKeyWarn]     = useState(false);
+  const [aiModel, setAiModel]     = useState("gemini-2.0-flash");
+  const [file, setFile]           = useState<File | null>(null);
+  const [domain, setDomain]       = useState("auto");
+  const [pages, setPages]         = useState("all");
+  const [fontFile, setFontFile]   = useState<File | null>(null);
+  const [glossary, setGlossary]   = useState<GlossaryEntry[]>([]);
 
-  // Glossary
-  const [glossary, setGlossary] = useState<GlossaryEntry[]>([]);
-  const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [inspect, setInspect]     = useState<{ pages:number; size_bytes:number } | null>(null);
+  const [inspecting, setInspecting] = useState(false);
 
-  // Custom font
-  const [fontFile, setFontFile] = useState<File | null>(null);
-  const [fontOpen, setFontOpen] = useState(false);
-
-  // Inspect
-  const [inspect, setInspect] = useState<InspectInfo | null>(null);
-  const [inspectLoading, setInspectLoading] = useState(false);
-  const [inspectError, setInspectError] = useState<string | null>(null);
-
-  // Job / progress
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [progress, setProgress] = useState({ step: "", done: 0, total: 100, message: "" });
-  const [result, setResult] = useState<ExtractionResult | null>(null);
+  const [jobId, setJobId]         = useState<string | null>(null);
+  const [progress, setProgress]   = useState({ step:"", done:0, total:100, message:"" });
+  const [result, setResult]       = useState<JobResult | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
-  // Review (HITL)
   const [reviewBlocks, setReviewBlocks] = useState<PDFBlock[]>([]);
-  const [reviewEdits, setReviewEdits] = useState<Map<string, string>>(new Map());
-  const [reviewPageIdx, setReviewPageIdx] = useState(0);
+  const [reviewEdits, setReviewEdits]   = useState<Map<string,string>>(new Map());
+  const [reviewPage, setReviewPage]     = useState(0);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
-  const [finalizing, setFinalizing] = useState(false);
-  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [finalizing, setFinalizing]     = useState(false);
+  const [finalErr, setFinalErr]         = useState<string|null>(null);
 
-  // Side-by-side
-  const [showSideBySide, setShowSideBySide] = useState(false);
-
-  // General
-  const [error, setError] = useState<string | null>(null);
+  const [sideBySide, setSideBySide] = useState(false);
+  const [error, setError]           = useState<string|null>(null);
   const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [dlError, setDlError]       = useState<string|null>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const fontInputRef = useRef<HTMLInputElement>(null);
-  const esRef = useRef<EventSource | null>(null);
-  const progressDoneRef = useRef(false);
+  // accordion state
+  const [settingsOpen, setSettingsOpen]   = useState(true);
+  const [glossaryOpen, setGlossaryOpen]   = useState(false);
+  const [fontOpen, setFontOpen]           = useState(false);
 
-  // ---------------------------------------------------------------------------
-  // Load encrypted API key + saved glossary on mount
-  // ---------------------------------------------------------------------------
+  const fileRef  = useRef<HTMLInputElement>(null);
+  const fontRef  = useRef<HTMLInputElement>(null);
+  const esRef    = useRef<EventSource|null>(null);
+  const doneRef  = useRef(false);
+
+  // Load on mount
   useEffect(() => {
-    // API key
-    const hasCiphertext = Boolean(localStorage.getItem(CRYPTO_DATA_LOCAL));
-    decryptApiKey().then(k => {
-      if (k) { setApiKey(k); }
-      else if (hasCiphertext) { setKeyDecryptWarn(true); } // exists but can't decrypt (new tab)
-    });
-    // Glossary
-    try {
-      const saved = localStorage.getItem(GLOSSARY_LOCAL);
-      if (saved) { const parsed = JSON.parse(saved); if (Array.isArray(parsed)) setGlossary(parsed); }
-    } catch { /* ignore */ }
+    const hasCt = !!localStorage.getItem(CRYPTO_DATA_LOC);
+    decryptKey().then(k => { if (k) setApiKey(k); else if (hasCt) setKeyWarn(true); });
+    try { const g = localStorage.getItem(GLOSSARY_LOC); if (g) setGlossary(JSON.parse(g)); } catch {}
   }, []);
+  useEffect(() => { try { localStorage.setItem(GLOSSARY_LOC, JSON.stringify(glossary)); } catch {} }, [glossary]);
 
-  // Persist glossary whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem(GLOSSARY_LOCAL, JSON.stringify(glossary)); } catch { /* ignore */ }
-  }, [glossary]);
+  const saveKey = useCallback((k: string) => { encryptKey(k); if (k.trim()) setKeyWarn(false); }, []);
 
-  const persistApiKey = useCallback((key: string) => {
-    encryptApiKey(key.trim());
-    if (key.trim()) setKeyDecryptWarn(false);
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Glossary helpers
-  // ---------------------------------------------------------------------------
-  const addGlossaryRow = () =>
-    setGlossary(g => [...g, { id: Math.random().toString(36).slice(2), source: "", target: "" }]);
-  const updateGlossaryRow = (id: string, field: "source" | "target", val: string) =>
-    setGlossary(g => g.map(e => e.id === id ? { ...e, [field]: val } : e));
-  const removeGlossaryRow = (id: string) =>
-    setGlossary(g => g.filter(e => e.id !== id));
-  const exportGlossary = () => {
-    const obj: Record<string, string> = {};
-    for (const e of glossary) if (e.source.trim() && e.target.trim()) obj[e.source.trim()] = e.target.trim();
-    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
-    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = "thikha_glossary.json"; a.click(); URL.revokeObjectURL(a.href);
-  };
-  const importGlossary = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    f.text().then(text => {
-      try {
-        const obj = JSON.parse(text) as Record<string, string>;
-        const entries: GlossaryEntry[] = Object.entries(obj).map(([s, t]) => ({ id: Math.random().toString(36).slice(2), source: s, target: String(t) }));
-        setGlossary(g => [...g, ...entries]);
-      } catch { alert("Invalid JSON file"); }
-    });
-    e.target.value = "";
-  };
-  const buildGlossaryJson = (): string => {
-    const obj: Record<string, string> = {};
+  // Glossary
+  const addRow    = () => setGlossary(g => [...g, { id: Math.random().toString(36).slice(2), source:"", target:"" }]);
+  const updateRow = (id:string, f:"source"|"target", v:string) => setGlossary(g => g.map(e => e.id===id ? {...e,[f]:v} : e));
+  const removeRow = (id:string) => setGlossary(g => g.filter(e => e.id!==id));
+  const glossaryJson = () => {
+    const obj: Record<string,string> = {};
     for (const e of glossary) if (e.source.trim() && e.target.trim()) obj[e.source.trim()] = e.target.trim();
     return Object.keys(obj).length ? JSON.stringify(obj) : "";
   };
 
-  // ---------------------------------------------------------------------------
   // Inspect
-  // ---------------------------------------------------------------------------
   const runInspect = useCallback(async (f: File) => {
-    setInspectLoading(true); setInspectError(null); setInspect(null);
+    setInspecting(true); setInspect(null);
     const fd = new FormData(); fd.append("pdf", f);
     try {
-      const res = await fetch("/api/inspect", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.details || data.error || "Inspect failed");
-      setInspect({ pages: data.pages, size_bytes: data.size_bytes });
-    } catch (e) { setInspectError(e instanceof Error ? e.message : "Inspect failed"); }
-    finally { setInspectLoading(false); }
+      const r = await fetch("/api/inspect", { method:"POST", body:fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error);
+      setInspect(d);
+    } catch {}
+    setInspecting(false);
   }, []);
 
-  const handleFileChange = (f: File | null) => {
-    setFile(f); setError(null); setInspect(null); setInspectError(null);
+  const setFile_ = (f: File|null) => {
+    setFile(f); setError(null); setInspect(null);
     if (f) void runInspect(f);
   };
 
-  const tryLoadPdfFromUrl = async () => {
-    const url = pdfUrl.trim(); if (!url) return;
-    setError(null);
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      if (!blob.type.includes("pdf") && !url.toLowerCase().endsWith(".pdf")) throw new Error("Not a PDF");
-      const name = url.split("/").pop()?.split("?")[0] || "document.pdf";
-      handleFileChange(new File([blob], name.endsWith(".pdf") ? name : `${name}.pdf`, { type: "application/pdf" }));
-    } catch { setError("Could not load PDF from URL (often blocked by CORS). Upload the file instead."); }
-  };
-
-  // ---------------------------------------------------------------------------
-  // Job flow
-  // ---------------------------------------------------------------------------
+  // Job
   const loadMeta = async (id: string) => {
-    try {
-      const res = await fetch(`/api/jobs/${id}/meta`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load results");
-      setResult({ dimensions: data.dimensions || [], blocks: data.blocks || [], summary: data.summary || { total_pages: 0, total_text_blocks: 0 } });
-      setReviewBlocks(data.blocks || []);
-      setReviewEdits(new Map());
-      setReviewPageIdx(0);
-      setReviewFilter("all");
-      setFinalizeError(null);
-      setScreen("review");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load results");
-      setScreen("upload");
-    }
+    const r = await fetch(`/api/jobs/${id}/meta`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    setResult({ dimensions: d.dimensions||[], blocks: d.blocks||[], summary: d.summary||{} });
+    setReviewBlocks(d.blocks||[]);
+    setReviewEdits(new Map()); setReviewPage(0); setReviewFilter("all");
+    setFinalErr(null); setScreen("review");
   };
 
   const subscribeProgress = (id: string) => {
-    if (esRef.current) { esRef.current.close(); esRef.current = null; }
+    esRef.current?.close();
     const es = new EventSource(`/api/jobs/${id}/progress`);
     esRef.current = es;
-    es.onmessage = (ev) => {
+    es.onmessage = ev => {
       try {
-        const data = JSON.parse(ev.data) as ProgressPayload;
-        if (data.event === "error" || data.status === "error") {
-          progressDoneRef.current = false;
-          setError(data.error || "Translation failed");
-          setScreen("upload"); es.close(); return;
+        const d = JSON.parse(ev.data);
+        if (d.event==="error" || d.status==="error") {
+          setError(d.error||"Translation failed"); setScreen("upload"); es.close(); return;
         }
-        if (data.event === "complete" || data.status === "complete" || data.step === "complete") {
-          if (progressDoneRef.current) return;
-          progressDoneRef.current = true;
-          setProgress(p => ({ ...p, step: "complete", done: p.total || 100, message: "Translation complete" }));
-          void loadMeta(id).finally(() => es.close());
+        if (d.event==="complete" || d.status==="complete" || d.step==="complete") {
+          if (doneRef.current) return;
+          doneRef.current = true;
+          loadMeta(id).catch(e => { setError(e.message); setScreen("upload"); }).finally(() => es.close());
           return;
         }
-        setProgress({ step: data.step || "", done: data.done ?? 0, total: Math.max(1, data.total ?? 100), message: data.message || "" });
-      } catch { /* ignore */ }
+        setProgress({ step:d.step||"", done:d.done??0, total:Math.max(1,d.total??100), message:d.message||"" });
+      } catch {}
     };
     es.onerror = () => es.close();
   };
@@ -313,695 +206,595 @@ export default function App() {
   const startTranslate = async () => {
     if (!file) return;
     const key = apiKey.trim();
-    if (!key) { setError("Enter your API key in the field below."); return; }
-    persistApiKey(key);
-    setError(null); setDownloadError(null);
-    setScreen("progress"); progressDoneRef.current = false;
-    setProgress({ step: "starting", done: 0, total: 100, message: "Starting…" });
+    if (!key) { setError("API key required."); return; }
+    saveKey(key);
+    setError(null); setDlError(null);
+    setScreen("progress"); doneRef.current = false;
+    setProgress({ step:"starting", done:0, total:100, message:"Starting…" });
 
     const fd = new FormData();
     fd.append("pdf", file);
     if (fontFile) fd.append("fontFile", fontFile);
 
-    const url = new URL("/api/jobs", window.location.origin);
+    const url = new URL("/api/jobs", location.origin);
     url.searchParams.set("domain", domain);
-    url.searchParams.set("pages", pages.trim() || "all");
+    url.searchParams.set("pages", pages.trim()||"all");
     url.searchParams.set("model", aiModel);
-    const glossaryJson = buildGlossaryJson();
-    if (glossaryJson) url.searchParams.set("glossary", glossaryJson);
+    const gj = glossaryJson(); if (gj) url.searchParams.set("glossary", gj);
 
     try {
-      const res = await fetch(url.toString(), { method: "POST", headers: { [API_KEY_HEADER]: key }, body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.details || data.error || "Failed to start job");
-      const id = data.jobId as string;
-      setJobId(id); subscribeProgress(id);
+      const r = await fetch(url.toString(), { method:"POST", headers:{ [API_KEY_HEADER]:key }, body:fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.details||d.error);
+      setJobId(d.jobId); subscribeProgress(d.jobId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to start translation");
-      setScreen("upload");
+      setError(e instanceof Error ? e.message : "Failed"); setScreen("upload");
     }
   };
 
   const cancelJob = async () => {
-    if (!jobId) { resetFlow(); return; }
+    if (!jobId) { reset(); return; }
     setCancelling(true);
-    if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    try { await fetch(`/api/jobs/${jobId}`, { method: "DELETE" }); } catch { /* ignore */ }
-    setCancelling(false);
-    resetFlow();
+    esRef.current?.close(); esRef.current = null;
+    try { await fetch(`/api/jobs/${jobId}`, { method:"DELETE" }); } catch {}
+    setCancelling(false); reset();
   };
 
-  // ---------------------------------------------------------------------------
-  // HITL Finalize
-  // ---------------------------------------------------------------------------
   const handleFinalize = async () => {
     if (!jobId) return;
-    setFinalizing(true); setFinalizeError(null);
-    const hasEdits = reviewEdits.size > 0;
-    if (hasEdits) {
-      const edited = reviewBlocks.map((b, i) => {
-        const key = `${i}`;
-        return reviewEdits.has(key) ? { ...b, myanmar_text: reviewEdits.get(key) } : b;
-      });
+    setFinalizing(true); setFinalErr(null);
+    if (reviewEdits.size > 0) {
+      const edited = reviewBlocks.map((b,i) => reviewEdits.has(`${i}`) ? {...b, myanmar_text:reviewEdits.get(`${i}`)} : b);
       try {
-        const res = await fetch(`/api/jobs/${jobId}/finalize`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ blocks: edited }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.details || data.error || "Finalize failed");
-      } catch (e) {
-        setFinalizeError(e instanceof Error ? e.message : "Finalize failed");
-        setFinalizing(false); return;
-      }
+        const r = await fetch(`/api/jobs/${jobId}/finalize`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({blocks:edited}) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.details||d.error);
+      } catch (e) { setFinalErr(e instanceof Error ? e.message : "Failed"); setFinalizing(false); return; }
     }
-    setShowSideBySide(false);
-    setScreen("result");
-    setFinalizing(false);
+    setSideBySide(false); setScreen("result"); setFinalizing(false);
   };
 
   const handleDownload = async () => {
-    if (!jobId || !file) return;
-    setDownloading(true); setDownloadError(null);
+    if (!jobId||!file) return;
+    setDownloading(true); setDlError(null);
     try {
-      const res = await fetch(`/api/jobs/${jobId}/download`);
-      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || err.details || `Download failed (${res.status})`); }
-      const blob = await res.blob();
+      const r = await fetch(`/api/jobs/${jobId}/download`);
+      if (!r.ok) { const e = await r.json().catch(()=>({})); throw new Error(e.error||`HTTP ${r.status}`); }
+      const blob = await r.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `thikha_${file.name.replace(/\.pdf$/i, "")}_myanmar.pdf`;
+      a.download = `thikha_${file.name.replace(/\.pdf$/i,"")}_myanmar.pdf`;
       a.click(); URL.revokeObjectURL(a.href);
       setJobId(null);
-    } catch (e) { setDownloadError(e instanceof Error ? e.message : "Download failed"); }
-    finally { setDownloading(false); }
+    } catch (e) { setDlError(e instanceof Error ? e.message : "Failed"); }
+    setDownloading(false);
   };
 
-  const resetFlow = () => {
-    if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    progressDoneRef.current = false;
+  const reset = () => {
+    esRef.current?.close(); esRef.current = null;
+    doneRef.current = false;
     setScreen("upload"); setFile(null); setResult(null); setJobId(null);
-    setInspect(null); setError(null); setDownloadError(null); setPdfUrl("");
-    setReviewBlocks([]); setReviewEdits(new Map()); setFinalizeError(null);
-    setShowSideBySide(false); setReviewFilter("all"); setCancelling(false);
+    setInspect(null); setError(null); setDlError(null);
+    setReviewBlocks([]); setReviewEdits(new Map()); setFinalErr(null);
+    setSideBySide(false); setReviewFilter("all"); setCancelling(false);
   };
 
-  // ---------------------------------------------------------------------------
   // Derived
-  // ---------------------------------------------------------------------------
-  const pct = progress.total > 0 ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
-  const stepLabel = (() => {
-    const s = progress.step;
-    if (s === "extract")  return "Step 1 — Extract structure";
-    if (s === "detect")   return "Step 2 — Domain detection";
-    if (s === "translate") return "Step 3 — Translating blocks";
-    if (s === "write")    return "Step 4 — Building PDF";
-    if (s === "verify")   return "Step 5 — Verifying output";
-    if (s === "complete") return "Complete";
-    return progress.message || "Starting…";
-  })();
+  const pct = Math.min(100, Math.round((progress.done / Math.max(1, progress.total)) * 100));
+  const stepLabel = { extract:"Extracting text", detect:"Detecting domain", translate:"Translating", write:"Building PDF", verify:"Verifying", complete:"Done" }[progress.step] || "Working…";
+  const modelMeta = AI_MODELS.find(m => m.value===aiModel);
+  const glossaryCount = glossary.filter(e => e.source.trim()&&e.target.trim()).length;
 
-  const currentModelMeta = AI_MODELS.find(m => m.value === aiModel);
-
-  // Review filtering
-  const filteredBlocks = reviewBlocks.filter((b, i) => {
-    if (reviewFilter === "edited")     return reviewEdits.has(`${i}`);
-    if (reviewFilter === "translated") return !!b.myanmar_text && !reviewEdits.has(`${i}`);
-    if (reviewFilter === "skipped")    return !b.myanmar_text && !reviewEdits.has(`${i}`);
+  const filtered = reviewBlocks.filter((b,i) => {
+    if (reviewFilter==="edited")     return reviewEdits.has(`${i}`);
+    if (reviewFilter==="translated") return !!b.myanmar_text && !reviewEdits.has(`${i}`);
+    if (reviewFilter==="skipped")    return !b.myanmar_text && !reviewEdits.has(`${i}`);
     return true;
   });
-  const reviewTotalPages = Math.ceil(filteredBlocks.length / REVIEW_PAGE_SIZE);
-  const reviewPageBlocks = filteredBlocks.slice(reviewPageIdx * REVIEW_PAGE_SIZE, (reviewPageIdx + 1) * REVIEW_PAGE_SIZE);
+  const totalReviewPages = Math.ceil(filtered.length / RPAGE);
+  const pageBlocks = filtered.slice(reviewPage*RPAGE, (reviewPage+1)*RPAGE);
   const editedCount = reviewEdits.size;
-
   const translatedCount = reviewBlocks.filter(b => !!b.myanmar_text).length;
-  const skippedCount = reviewBlocks.length - translatedCount;
+  const qualityPct = result ? Math.round(((result.summary.translated_blocks??0)/Math.max(1,result.summary.total_text_blocks))*100) : 0;
 
-  // Filter tab counts
-  const filterCounts: Record<ReviewFilter, number> = {
-    all:        reviewBlocks.length,
-    translated: reviewBlocks.filter((b, i) => !!b.myanmar_text && !reviewEdits.has(`${i}`)).length,
-    edited:     editedCount,
-    skipped:    reviewBlocks.filter((b, i) => !b.myanmar_text && !reviewEdits.has(`${i}`)).length,
-  };
-
-  const glossaryTermCount = glossary.filter(e => e.source.trim() && e.target.trim()).length;
-
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
+  // =========================================================================
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans selection:bg-blue-100 selection:text-blue-900">
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <Layout className="text-white w-5 h-5" />
-            </div>
-            <h1 className="text-lg font-semibold tracking-tight">ThiKha Translate</h1>
-          </div>
-          {result && (screen === "result" || screen === "review") && (
-            <div className="flex gap-4 text-sm font-medium text-gray-500">
-              <span className="flex items-center gap-1"><FileText className="w-4 h-4" />{result.summary.total_pages} pages</span>
-              <span className="flex items-center gap-1"><Type className="w-4 h-4" />{result.summary.total_text_blocks} blocks</span>
-              {result.summary.translated_blocks != null && (
-                <span className="flex items-center gap-1 text-green-600 font-semibold">
-                  <CheckCircle2 className="w-4 h-4" />
-                  {Math.round((result.summary.translated_blocks / Math.max(1, result.summary.total_text_blocks)) * 100)}% translated
-                </span>
-              )}
-            </div>
+    <div className="min-h-screen bg-white text-zinc-900 font-[system-ui,-apple-system,sans-serif]">
+
+      {/* Header */}
+      <header className="border-b border-zinc-100 h-14 flex items-center px-6 sticky top-0 bg-white/95 backdrop-blur-sm z-10">
+        <div className="max-w-2xl mx-auto w-full flex items-center justify-between">
+          <span className="font-semibold text-base tracking-tight">ThiKha Translate</span>
+          {result && (screen==="review"||screen==="result") && (
+            <span className="text-sm text-zinc-400">
+              {result.summary.total_pages}p · {qualityPct}% translated
+            </span>
           )}
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-8">
+      <main className="max-w-2xl mx-auto px-6 py-10">
         <AnimatePresence mode="wait">
 
-          {/* ================================================================ */}
-          {/* UPLOAD SCREEN                                                    */}
-          {/* ================================================================ */}
-          {screen === "upload" && (
-            <motion.div key="upload" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="max-w-xl mx-auto space-y-5">
+          {/* ============================================================== */}
+          {/* UPLOAD                                                          */}
+          {/* ============================================================== */}
+          {screen==="upload" && (
+            <motion.div key="upload" initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0,y:-6}} className="space-y-6">
 
               {/* Drop zone */}
               <div
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const f = e.dataTransfer.files?.[0];
-                  if (f?.type === "application/pdf") handleFileChange(f);
-                  else setError("Please drop a PDF file.");
-                }}
-                className="border-2 border-dashed border-gray-300 rounded-2xl p-10 text-center hover:border-blue-500 hover:bg-blue-50/30 transition-all cursor-pointer group"
+                onClick={() => fileRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); const f=e.dataTransfer.files?.[0]; if(f?.type==="application/pdf") setFile_(f); else setError("PDF files only."); }}
+                className="border-2 border-dashed border-zinc-200 rounded-2xl p-12 text-center cursor-pointer hover:border-zinc-400 hover:bg-zinc-50/50 transition-all group"
               >
-                <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
-                  <FileUp className="w-8 h-8 text-blue-600" />
-                </div>
-                <h2 className="text-xl font-semibold mb-2">Upload PDF</h2>
-                <p className="text-gray-500 text-sm mb-4">Drag and drop, or click to browse. PDF only, max 100 MB.</p>
-                <input type="file" ref={fileInputRef} onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileChange(f); }} accept=".pdf,application/pdf" className="hidden" />
-                {file && (
-                  <div className="mt-4 text-left bg-white p-4 rounded-xl border border-blue-100" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <CheckCircle2 className="text-green-500 w-5 h-5 shrink-0" />
-                        <span className="text-sm font-medium truncate">{file.name}</span>
-                      </div>
-                      <button type="button" onClick={() => handleFileChange(null)} className="text-xs text-gray-400 hover:text-red-500 font-medium shrink-0">Remove</button>
+                <input type="file" ref={fileRef} accept=".pdf,application/pdf" className="hidden"
+                  onChange={e => { const f=e.target.files?.[0]; if(f) setFile_(f); }} />
+                {!file ? (
+                  <>
+                    <div className="w-12 h-12 rounded-xl bg-zinc-100 flex items-center justify-center mx-auto mb-4 group-hover:bg-zinc-200 transition-colors">
+                      <FileUp className="w-6 h-6 text-zinc-500" />
                     </div>
-                    {inspectLoading && <p className="text-xs text-gray-500 mt-2 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Reading PDF…</p>}
-                    {inspect && !inspectLoading && <p className="text-xs text-gray-600 mt-2">{inspect.pages} pages · {formatBytes(inspect.size_bytes)}</p>}
-                    {inspectError && <p className="text-xs text-amber-600 mt-2">{inspectError}</p>}
+                    <p className="font-medium text-zinc-900 mb-1">Drop a PDF here</p>
+                    <p className="text-sm text-zinc-400">or click to browse · max 100 MB</p>
+                  </>
+                ) : (
+                  <div className="flex items-center justify-between gap-3" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center shrink-0">
+                        <CheckCircle2 className="w-5 h-5 text-blue-600" />
+                      </div>
+                      <div className="min-w-0 text-left">
+                        <p className="text-sm font-medium text-zinc-900 truncate">{file.name}</p>
+                        {inspecting && <p className="text-xs text-zinc-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin"/>Reading…</p>}
+                        {inspect && <p className="text-xs text-zinc-400">{inspect.pages} pages · {fmt(inspect.size_bytes)}</p>}
+                      </div>
+                    </div>
+                    <button onClick={() => setFile_(null)} className="text-xs text-zinc-400 hover:text-red-500 font-medium shrink-0 transition-colors">Remove</button>
                   </div>
                 )}
               </div>
 
-              {/* PDF URL */}
-              <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-3">
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Optional — PDF URL</p>
-                <div className="flex gap-2">
-                  <input type="url" value={pdfUrl} onChange={(e) => setPdfUrl(e.target.value)} placeholder="https://…/document.pdf" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-blue-500" />
-                  <button type="button" onClick={() => void tryLoadPdfFromUrl()} className="px-3 py-2 text-sm font-medium bg-gray-100 rounded-lg hover:bg-gray-200">Load</button>
-                </div>
-                <p className="text-[11px] text-gray-400">Many sites block cross-origin downloads — uploading a local file is most reliable.</p>
-              </div>
-
-              {/* AI Model + API Key + Domain + Pages */}
-              <div className="bg-white rounded-2xl border border-gray-200 p-5 space-y-4">
-                {/* Model selector */}
-                <div>
-                  <label className="block text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-2">AI Model</label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                    {AI_MODELS.map((m) => (
-                      <button key={m.value} type="button" onClick={() => setAiModel(m.value)}
-                        className={`text-left px-3 py-2 rounded-lg border text-xs font-medium transition-all ${aiModel === m.value ? "border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-400" : "border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50"}`}
-                      >
-                        <div className="font-semibold truncate">{m.label}</div>
-                        <div className="text-[10px] opacity-60 mt-0.5">{m.provider}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* API Key */}
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-1.5 text-sm font-semibold text-gray-800">
-                      <KeyRound className="w-4 h-4 text-blue-600" />
-                      {currentModelMeta?.provider ?? "AI"} API Key
-                      <Lock className="w-3 h-3 text-gray-400" title="AES-GCM encrypted in localStorage" />
-                    </div>
-                    <a href={currentModelMeta?.keyLink} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-500 hover:underline">Get key ↗</a>
-                  </div>
-                  {keyDecryptWarn && (
-                    <div className="mb-2 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                      <Info className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <p className="text-[11px] text-amber-700">A saved API key was found but can't be decrypted in this browser tab (encryption key is tab-scoped). Please re-enter your key.</p>
-                    </div>
-                  )}
-                  <input
-                    type="password" autoComplete="off" value={apiKey}
-                    onChange={(e) => { setApiKey(e.target.value); persistApiKey(e.target.value); }}
-                    placeholder="Paste your API key"
-                    className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                  />
-                  <p className="text-[11px] text-gray-400 mt-1">Encrypted locally (AES-GCM) — never sent to any third party.</p>
-                </div>
-
-                {/* Domain + Pages */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-1">Domain</label>
-                    <select value={domain} onChange={(e) => setDomain(e.target.value)} className="w-full text-sm bg-gray-50 border border-gray-200 rounded-lg p-2.5 outline-none focus:ring-1 focus:ring-blue-500">
-                      <option value="auto">Auto-detect</option>
-                      <option value="medical">Medical</option>
-                      <option value="tech">Technology</option>
-                      <option value="academic">Academic</option>
-                      <option value="legal">Legal</option>
-                      <option value="general">General</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] uppercase font-bold text-gray-400 tracking-wider mb-1">Page range</label>
-                    <input value={pages} onChange={(e) => setPages(e.target.value)} placeholder="all or 1-5" className="w-full text-sm border border-gray-200 rounded-lg p-2.5 outline-none focus:ring-1 focus:ring-blue-500" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Custom Glossary */}
-              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <button type="button" onClick={() => setGlossaryOpen(o => !o)} className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                    <BookOpen className="w-4 h-4 text-purple-500" />
-                    Custom Glossary
-                    {glossaryTermCount > 0 && <span className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 font-medium">{glossaryTermCount} terms</span>}
-                  </div>
-                  {glossaryOpen ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+              {/* Settings accordion */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden">
+                <button onClick={() => setSettingsOpen(o=>!o)}
+                  className="w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors"
+                >
+                  <span>Settings</span>
+                  <ChevronDown className={`w-4 h-4 text-zinc-400 transition-transform ${settingsOpen?"rotate-180":""}`} />
                 </button>
-                <AnimatePresence>
-                  {glossaryOpen && (
-                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
-                      <div className="px-5 pb-4 space-y-3 border-t border-gray-100">
-                        <p className="text-[11px] text-gray-400 pt-3">Define exact translations. Persisted across sessions. <span className="text-purple-500 font-medium">Auto-saved to browser.</span></p>
-                        {glossary.map((entry) => (
-                          <div key={entry.id} className="flex gap-2 items-center">
-                            <input value={entry.source} onChange={(e) => updateGlossaryRow(entry.id, "source", e.target.value)} placeholder="Source term" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400" />
-                            <span className="text-gray-400 text-sm font-medium shrink-0">→</span>
-                            <input value={entry.target} onChange={(e) => updateGlossaryRow(entry.id, "target", e.target.value)} placeholder="Myanmar translation" className="flex-1 text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-1 focus:ring-purple-400" />
-                            <button type="button" onClick={() => removeGlossaryRow(entry.id)} className="shrink-0 text-gray-300 hover:text-red-500 transition-colors"><Trash2 className="w-4 h-4" /></button>
-                          </div>
+                {settingsOpen && (
+                  <div className="border-t border-zinc-100 px-4 py-4 space-y-4">
+
+                    {/* API Key */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className={lbl + " flex items-center gap-1"}>
+                          <KeyRound className="w-3.5 h-3.5" />
+                          {modelMeta?.provider ?? "AI"} API Key
+                        </label>
+                        <a href={modelMeta?.keyLink} target="_blank" rel="noopener noreferrer" className="text-[11px] text-blue-500 hover:underline">Get key ↗</a>
+                      </div>
+                      {keyWarn && (
+                        <div className="mb-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                          Saved key found but can't decrypt in this tab — please re-enter.
+                        </div>
+                      )}
+                      <input type="password" autoComplete="off" value={apiKey}
+                        onChange={e => { setApiKey(e.target.value); saveKey(e.target.value); }}
+                        placeholder="Paste API key (AES-encrypted locally)"
+                        className={inp + " font-mono"}
+                      />
+                    </div>
+
+                    {/* Model */}
+                    <div>
+                      <label className={lbl}>Model</label>
+                      <select value={aiModel} onChange={e => setAiModel(e.target.value)} className={inp}>
+                        {AI_MODELS.map(m => (
+                          <option key={m.value} value={m.value}>{m.label} — {m.provider}</option>
                         ))}
-                        <div className="flex gap-2 pt-1">
-                          <button type="button" onClick={addGlossaryRow} className="flex items-center gap-1.5 text-sm text-purple-600 hover:text-purple-700 font-medium">
-                            <Plus className="w-4 h-4" /> Add term
-                          </button>
-                          {glossaryTermCount > 0 && (
-                            <>
-                              <span className="text-gray-300">·</span>
-                              <button type="button" onClick={exportGlossary} className="text-sm text-gray-500 hover:text-gray-700">Export JSON</button>
-                            </>
-                          )}
-                          <span className="text-gray-300">·</span>
-                          <label className="text-sm text-gray-500 hover:text-gray-700 cursor-pointer">
-                            Import JSON
-                            <input type="file" accept=".json" className="hidden" onChange={importGlossary} />
-                          </label>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
+                      </select>
+                    </div>
 
-              {/* Custom Font Upload */}
-              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                <button type="button" onClick={() => setFontOpen(o => !o)} className="w-full flex items-center justify-between px-5 py-4 hover:bg-gray-50 transition-colors">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                    <Upload className="w-4 h-4 text-amber-500" />
-                    Custom Myanmar Font
-                    {fontFile && <span className="text-xs bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 font-medium truncate max-w-[120px]">{fontFile.name}</span>}
+                    {/* Domain + Pages */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className={lbl}>Domain</label>
+                        <select value={domain} onChange={e => setDomain(e.target.value)} className={inp}>
+                          <option value="auto">Auto-detect</option>
+                          <option value="medical">Medical</option>
+                          <option value="tech">Technology</option>
+                          <option value="academic">Academic</option>
+                          <option value="legal">Legal</option>
+                          <option value="general">General</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className={lbl}>Pages</label>
+                        <input value={pages} onChange={e => setPages(e.target.value)}
+                          placeholder="all or 1-5" className={inp} />
+                      </div>
+                    </div>
                   </div>
-                  {fontOpen ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
-                </button>
-                <AnimatePresence>
-                  {fontOpen && (
-                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
-                      <div className="px-5 pb-4 border-t border-gray-100 pt-3 space-y-3">
-                        <p className="text-[11px] text-gray-400">Upload any Myanmar .ttf font (Padauk, Myanmar Text, etc.). Default: Pyidaungsu.</p>
-                        <div className="flex gap-2 items-center">
-                          <button type="button" onClick={() => fontInputRef.current?.click()} className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-amber-50 border border-amber-200 text-amber-700 rounded-lg hover:bg-amber-100 transition-colors">
-                            <Upload className="w-4 h-4" />
-                            {fontFile ? "Change font" : "Choose .ttf font"}
-                          </button>
-                          {fontFile && <button type="button" onClick={() => setFontFile(null)} className="text-xs text-gray-400 hover:text-red-500">Remove</button>}
-                          <input type="file" ref={fontInputRef} accept=".ttf,.otf" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) setFontFile(f); }} />
-                        </div>
-                        {fontFile && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-3 py-1.5">{fontFile.name} ({formatBytes(fontFile.size)})</p>}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                )}
               </div>
 
+              {/* Glossary */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden">
+                <button onClick={() => setGlossaryOpen(o=>!o)}
+                  className="w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="w-4 h-4 text-zinc-400" />
+                    <span>Glossary</span>
+                    {glossaryCount > 0 && <span className="text-xs text-zinc-400 font-normal">{glossaryCount} terms saved</span>}
+                  </div>
+                  <ChevronDown className={`w-4 h-4 text-zinc-400 transition-transform ${glossaryOpen?"rotate-180":""}`} />
+                </button>
+                {glossaryOpen && (
+                  <div className="border-t border-zinc-100 px-4 py-4 space-y-3">
+                    <p className="text-xs text-zinc-400">These terms will always be translated exactly as specified.</p>
+                    {glossary.map(e => (
+                      <div key={e.id} className="flex gap-2 items-center">
+                        <input value={e.source} onChange={ev => updateRow(e.id,"source",ev.target.value)}
+                          placeholder="Source term" className={inp + " flex-1"} />
+                        <span className="text-zinc-300 text-sm">→</span>
+                        <input value={e.target} onChange={ev => updateRow(e.id,"target",ev.target.value)}
+                          placeholder="မြန်မာ" className={inp + " flex-1"} />
+                        <button onClick={() => removeRow(e.id)} className="text-zinc-300 hover:text-red-400 transition-colors shrink-0">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                    <button onClick={addRow} className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-800 transition-colors">
+                      <Plus className="w-4 h-4" /> Add term
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Custom Font */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden">
+                <button onClick={() => setFontOpen(o=>!o)}
+                  className="w-full flex items-center justify-between px-4 py-3.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <Upload className="w-4 h-4 text-zinc-400" />
+                    <span>Custom Font</span>
+                    {fontFile && <span className="text-xs text-zinc-400 font-normal truncate max-w-[140px]">{fontFile.name}</span>}
+                  </div>
+                  <ChevronDown className={`w-4 h-4 text-zinc-400 transition-transform ${fontOpen?"rotate-180":""}`} />
+                </button>
+                {fontOpen && (
+                  <div className="border-t border-zinc-100 px-4 py-4 space-y-3">
+                    <p className="text-xs text-zinc-400">Upload a Myanmar .ttf font. Defaults to Pyidaungsu if not set.</p>
+                    <div className="flex gap-2 items-center">
+                      <button onClick={() => fontRef.current?.click()}
+                        className="text-sm px-3 py-1.5 border border-zinc-200 rounded-lg text-zinc-600 hover:bg-zinc-50 transition-colors">
+                        {fontFile ? "Change font" : "Choose .ttf"}
+                      </button>
+                      {fontFile && <button onClick={() => setFontFile(null)} className="text-xs text-zinc-400 hover:text-red-400 transition-colors">Remove</button>}
+                      {fontFile && <span className="text-xs text-zinc-400">{fmt(fontFile.size)}</span>}
+                      <input type="file" ref={fontRef} accept=".ttf,.otf" className="hidden"
+                        onChange={e => { const f=e.target.files?.[0]; if(f) setFontFile(f); }} />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Error */}
               {error && (
-                <div className="bg-red-50 border border-red-100 p-4 rounded-xl flex gap-3 text-red-700 text-sm">
-                  <AlertCircle className="w-5 h-5 shrink-0" />
-                  <div><p className="font-semibold">Something went wrong</p><p className="opacity-90">{error}</p></div>
+                <div className="flex items-start gap-2.5 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <p>{error}</p>
                 </div>
               )}
 
-              <button type="button" onClick={() => void startTranslate()} disabled={!file || !apiKey.trim()}
-                className={`w-full py-4 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 ${file && apiKey.trim() ? "bg-blue-600 text-white hover:bg-blue-700 shadow-lg shadow-blue-200" : "bg-gray-100 text-gray-400 cursor-not-allowed"}`}
+              {/* CTA */}
+              <button onClick={() => void startTranslate()} disabled={!file||!apiKey.trim()}
+                className="w-full py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-zinc-900 text-white hover:bg-zinc-700 active:scale-[0.99]"
               >
                 Translate PDF
               </button>
             </motion.div>
           )}
 
-          {/* ================================================================ */}
-          {/* PROGRESS SCREEN                                                  */}
-          {/* ================================================================ */}
-          {screen === "progress" && (
-            <motion.div key="progress" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="max-w-lg mx-auto py-16">
-              <div className="bg-white rounded-2xl border border-gray-200 p-8 shadow-sm">
-                <div className="flex flex-col items-center text-center mb-6">
-                  <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
-                  <p className="text-lg font-semibold text-gray-900">{stepLabel}</p>
-                  <p className="text-sm text-gray-500 mt-1">{progress.message}</p>
-                  <p className="text-xs text-gray-400 mt-2 flex items-center gap-1">
-                    Using <span className="font-medium text-blue-600">{currentModelMeta?.label ?? aiModel}</span>
-                    {currentModelMeta && <span className="text-gray-300">·</span>}
-                    {currentModelMeta && <span>{currentModelMeta.provider}</span>}
-                  </p>
-                </div>
-                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-600 transition-all duration-300 rounded-full" style={{ width: `${pct}%` }} />
-                </div>
-                <p className="text-center text-xs text-gray-400 mt-2">{pct}%</p>
-                {progress.step === "translate" && (
-                  <p className="text-center text-[11px] text-gray-400 mt-3">Large PDFs may take several minutes…</p>
-                )}
-                <div className="mt-6 flex justify-center">
-                  <button type="button" onClick={() => void cancelJob()} disabled={cancelling}
-                    className="flex items-center gap-2 px-4 py-2 text-sm text-gray-500 border border-gray-200 rounded-lg hover:bg-red-50 hover:text-red-600 hover:border-red-200 disabled:opacity-50 transition-colors"
-                  >
-                    {cancelling ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
-                    {cancelling ? "Cancelling…" : "Cancel"}
-                  </button>
-                </div>
+          {/* ============================================================== */}
+          {/* PROGRESS                                                        */}
+          {/* ============================================================== */}
+          {screen==="progress" && (
+            <motion.div key="progress" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}
+              className="flex flex-col items-center justify-center min-h-[60vh] text-center gap-6"
+            >
+              <Loader2 className="w-8 h-8 text-zinc-400 animate-spin" />
+
+              <div className="space-y-1">
+                <p className="font-medium text-zinc-900">{stepLabel}</p>
+                <p className="text-sm text-zinc-400">{progress.message || "Please wait…"}</p>
+                <p className="text-xs text-zinc-300">{modelMeta?.label ?? aiModel}</p>
               </div>
+
+              {/* Progress bar */}
+              <div className="w-full max-w-xs">
+                <div className="h-1 bg-zinc-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-zinc-900 transition-all duration-300 rounded-full" style={{width:`${pct}%`}} />
+                </div>
+                <p className="text-xs text-zinc-400 mt-1.5 text-right">{pct}%</p>
+              </div>
+
+              <button onClick={() => void cancelJob()} disabled={cancelling}
+                className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-red-500 transition-colors disabled:opacity-50"
+              >
+                {cancelling ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}
+                {cancelling ? "Cancelling…" : "Cancel"}
+              </button>
             </motion.div>
           )}
 
-          {/* ================================================================ */}
-          {/* REVIEW SCREEN (Human-in-the-Loop)                               */}
-          {/* ================================================================ */}
-          {screen === "review" && (
-            <motion.div key="review" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="max-w-5xl mx-auto space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* ============================================================== */}
+          {/* REVIEW                                                          */}
+          {/* ============================================================== */}
+          {screen==="review" && (
+            <motion.div key="review" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="space-y-5">
+
+              {/* Header row */}
+              <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                    <Pencil className="w-5 h-5 text-blue-600" />
-                    Review Translations
-                  </h2>
-                  <p className="text-sm text-gray-500 mt-0.5">
-                    {reviewBlocks.length} blocks · {result?.summary.total_pages} pages
-                    · <span className="text-green-600 font-medium">{translatedCount} translated</span>
-                    {skippedCount > 0 && <span className="text-gray-400"> · {skippedCount} skipped</span>}
-                    {editedCount > 0 && <span className="text-blue-600 font-medium"> · {editedCount} edited</span>}
+                  <h2 className="font-semibold text-zinc-900">Review Translations</h2>
+                  <p className="text-sm text-zinc-400 mt-0.5">
+                    {translatedCount} of {reviewBlocks.length} blocks translated
+                    {editedCount > 0 && ` · ${editedCount} edited`}
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <button type="button" onClick={resetFlow} className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">
-                    Start Over
+                <div className="flex gap-2">
+                  <button onClick={reset} className="text-sm text-zinc-400 hover:text-zinc-700 transition-colors px-3 py-1.5 rounded-lg hover:bg-zinc-50">
+                    Start over
                   </button>
-                  <button type="button" onClick={() => { setShowSideBySide(false); setScreen("result"); }}
-                    className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+                  <button onClick={() => { setSideBySide(false); setScreen("result"); }}
+                    className="flex items-center gap-1.5 text-sm text-zinc-500 border border-zinc-200 rounded-lg px-3 py-1.5 hover:bg-zinc-50 transition-colors"
                   >
-                    <SkipForward className="w-4 h-4" /> Skip Review
+                    <SkipForward className="w-3.5 h-3.5" /> Skip
                   </button>
-                  <button type="button" onClick={() => void handleFinalize()} disabled={finalizing}
-                    className="px-5 py-2 text-sm font-semibold bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2 transition-colors"
+                  <button onClick={() => void handleFinalize()} disabled={finalizing}
+                    className="text-sm font-semibold bg-zinc-900 text-white rounded-lg px-4 py-1.5 hover:bg-zinc-700 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
                   >
-                    {finalizing ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</> : <><Save className="w-4 h-4" /> {editedCount > 0 ? "Apply Edits & Export" : "Export PDF"}</>}
+                    {finalizing ? <><Loader2 className="w-3.5 h-3.5 animate-spin"/>Generating…</> : (editedCount>0 ? "Apply & Export" : "Export PDF")}
                   </button>
                 </div>
               </div>
 
-              {finalizeError && (
-                <div className="bg-red-50 border border-red-100 p-4 rounded-xl flex gap-3 text-red-700 text-sm">
-                  <AlertCircle className="w-5 h-5 shrink-0" />
-                  <div><p className="font-semibold">Finalize failed</p><p>{finalizeError}</p></div>
+              {finalErr && (
+                <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+                  <AlertCircle className="w-4 h-4 shrink-0" />{finalErr}
                 </div>
               )}
 
-              {/* Filter tabs */}
-              <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl p-1 w-fit">
-                {(["all", "translated", "edited", "skipped"] as ReviewFilter[]).map((f) => (
-                  <button key={f} type="button"
-                    onClick={() => { setReviewFilter(f); setReviewPageIdx(0); }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${reviewFilter === f ? "bg-blue-600 text-white" : "text-gray-500 hover:bg-gray-100"}`}
-                  >
-                    <Filter className="w-3 h-3" />
-                    {f.charAt(0).toUpperCase() + f.slice(1)}
-                    <span className={`rounded-full px-1.5 text-[10px] font-bold ${reviewFilter === f ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-500"}`}>
-                      {filterCounts[f]}
-                    </span>
-                  </button>
-                ))}
+              {/* Filter pills */}
+              <div className="flex gap-1.5 flex-wrap">
+                {(["all","translated","edited","skipped"] as ReviewFilter[]).map(f => {
+                  const count = f==="all" ? reviewBlocks.length
+                    : f==="edited" ? editedCount
+                    : f==="translated" ? reviewBlocks.filter((b,i)=>!!b.myanmar_text&&!reviewEdits.has(`${i}`)).length
+                    : reviewBlocks.filter((b,i)=>!b.myanmar_text&&!reviewEdits.has(`${i}`)).length;
+                  return (
+                    <button key={f} onClick={() => { setReviewFilter(f); setReviewPage(0); }}
+                      className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${reviewFilter===f ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"}`}
+                    >
+                      {f.charAt(0).toUpperCase()+f.slice(1)} · {count}
+                    </button>
+                  );
+                })}
               </div>
 
-              {/* Blocks table */}
-              <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                {reviewPageBlocks.length === 0 ? (
-                  <div className="p-12 text-center text-gray-400">
-                    <Filter className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                    <p className="text-sm">No blocks in this filter.</p>
-                  </div>
+              {/* Table */}
+              <div className="border border-zinc-200 rounded-xl overflow-hidden">
+                {pageBlocks.length===0 ? (
+                  <div className="py-16 text-center text-sm text-zinc-400">No blocks match this filter.</div>
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="bg-gray-50 border-b border-gray-200 text-left">
-                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-12">Pg</th>
-                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-1/2">Original Text</th>
-                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider">Myanmar Translation</th>
-                          <th className="px-4 py-3 text-[10px] uppercase font-bold text-gray-400 tracking-wider w-16">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {reviewPageBlocks.map((block) => {
-                          // Find global index
-                          const globalIdx = reviewBlocks.indexOf(block);
-                          const key = `${globalIdx}`;
-                          const currentTranslation = reviewEdits.has(key) ? reviewEdits.get(key)! : (block.myanmar_text ?? "");
-                          const isEdited = reviewEdits.has(key);
-                          const hasTranslation = !!block.myanmar_text;
-                          return (
-                            <tr key={`${block.page_number}-${block.block_index}-${globalIdx}`} className={isEdited ? "bg-blue-50/40" : ""}>
-                              <td className="px-4 py-3 text-xs text-gray-400 font-mono align-top">{block.page_number}</td>
-                              <td className="px-4 py-3 align-top">
-                                <p className="text-gray-700 text-xs leading-relaxed line-clamp-3">{block.text}</p>
-                              </td>
-                              <td className="px-4 py-3 align-top">
-                                <textarea
-                                  value={currentTranslation}
-                                  onChange={(e) => {
-                                    const newMap = new Map(reviewEdits);
-                                    if (e.target.value === (block.myanmar_text ?? "")) newMap.delete(key);
-                                    else newMap.set(key, e.target.value);
-                                    setReviewEdits(newMap);
-                                  }}
-                                  rows={2}
-                                  placeholder="No translation"
-                                  className={`w-full text-xs border rounded-lg px-2 py-1.5 outline-none resize-y font-sans leading-relaxed transition-colors ${isEdited ? "border-blue-300 bg-white focus:ring-1 focus:ring-blue-400" : "border-gray-200 bg-gray-50 focus:border-blue-300 focus:bg-white focus:ring-1 focus:ring-blue-300"}`}
-                                />
-                              </td>
-                              <td className="px-4 py-3 align-top">
-                                {isEdited ? (
-                                  <span className="inline-block text-[10px] bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 font-medium">Edited</span>
-                                ) : hasTranslation ? (
-                                  <span className="inline-block text-[10px] bg-green-100 text-green-700 rounded-full px-2 py-0.5 font-medium">Done</span>
-                                ) : (
-                                  <span className="inline-block text-[10px] bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">Skipped</span>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-zinc-100">
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium w-10">Pg</th>
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium w-[42%]">Original</th>
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium">Myanmar</th>
+                        <th className="px-4 py-2.5 w-14"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-50">
+                      {pageBlocks.map(block => {
+                        const gi = reviewBlocks.indexOf(block);
+                        const key = `${gi}`;
+                        const cur = reviewEdits.has(key) ? reviewEdits.get(key)! : (block.myanmar_text??"");
+                        const isEdited = reviewEdits.has(key);
+                        return (
+                          <tr key={`${block.page_number}-${block.block_index}-${gi}`} className={isEdited?"bg-blue-50/30":""}>
+                            <td className="px-4 py-3 text-xs text-zinc-400 align-top font-mono">{block.page_number}</td>
+                            <td className="px-4 py-3 align-top">
+                              <p className="text-xs text-zinc-600 leading-relaxed line-clamp-3">{block.text}</p>
+                            </td>
+                            <td className="px-4 py-3 align-top">
+                              <textarea
+                                value={cur}
+                                onChange={e => {
+                                  const m = new Map(reviewEdits);
+                                  if (e.target.value===(block.myanmar_text??"")) m.delete(key); else m.set(key,e.target.value);
+                                  setReviewEdits(m);
+                                }}
+                                rows={2}
+                                placeholder="—"
+                                className="w-full text-xs border border-zinc-200 rounded-lg px-2 py-1.5 outline-none resize-y bg-white focus:ring-1 focus:ring-blue-400 focus:border-blue-300 transition-colors"
+                              />
+                            </td>
+                            <td className="px-4 py-3 align-top text-right">
+                              {isEdited ? (
+                                <span className="text-[10px] text-blue-600 font-medium">Edited</span>
+                              ) : block.myanmar_text ? (
+                                <span className="text-[10px] text-green-600">Done</span>
+                              ) : (
+                                <span className="text-[10px] text-zinc-300">Skip</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 )}
               </div>
 
               {/* Pagination */}
-              {reviewTotalPages > 1 && (
-                <div className="flex items-center justify-between">
-                  <button type="button" onClick={() => setReviewPageIdx(p => Math.max(0, p - 1))} disabled={reviewPageIdx === 0}
-                    className="flex items-center gap-1 px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
-                  >
-                    <ArrowLeft className="w-4 h-4" /> Previous
+              {totalReviewPages > 1 && (
+                <div className="flex items-center justify-between text-sm">
+                  <button onClick={() => setReviewPage(p=>Math.max(0,p-1))} disabled={reviewPage===0}
+                    className="flex items-center gap-1 text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors">
+                    <ArrowLeft className="w-4 h-4"/>Prev
                   </button>
-                  <span className="text-sm text-gray-500">
-                    Page {reviewPageIdx + 1} of {reviewTotalPages}
-                  </span>
-                  <button type="button" onClick={() => setReviewPageIdx(p => Math.min(reviewTotalPages - 1, p + 1))} disabled={reviewPageIdx >= reviewTotalPages - 1}
-                    className="flex items-center gap-1 px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg disabled:opacity-40 hover:bg-gray-50 transition-colors"
-                  >
-                    Next <ArrowRight className="w-4 h-4" />
+                  <span className="text-zinc-400 text-xs">Page {reviewPage+1} / {totalReviewPages}</span>
+                  <button onClick={() => setReviewPage(p=>Math.min(totalReviewPages-1,p+1))} disabled={reviewPage>=totalReviewPages-1}
+                    className="flex items-center gap-1 text-zinc-400 hover:text-zinc-700 disabled:opacity-30 transition-colors">
+                    Next<ArrowRight className="w-4 h-4"/>
                   </button>
                 </div>
               )}
             </motion.div>
           )}
 
-          {/* ================================================================ */}
-          {/* RESULT SCREEN                                                    */}
-          {/* ================================================================ */}
-          {screen === "result" && result && (
-            <motion.div key="result" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} className="max-w-4xl mx-auto space-y-6">
+          {/* ============================================================== */}
+          {/* RESULT                                                          */}
+          {/* ============================================================== */}
+          {screen==="result" && result && (
+            <motion.div key="result" initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} exit={{opacity:0}} className="space-y-6">
 
-              {/* Summary card */}
-              <div className="bg-white rounded-2xl border border-gray-200 p-6">
-                <div className="flex items-center gap-3 mb-5">
-                  <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center">
-                    <CheckCircle2 className="w-6 h-6 text-green-600" />
-                  </div>
+              {/* Stats row */}
+              <div className="border border-zinc-200 rounded-xl p-6 space-y-5">
+                <div className="flex items-start justify-between">
                   <div>
-                    <h2 className="text-lg font-semibold">Translation Complete</h2>
-                    <p className="text-sm text-gray-500">
-                      {result.summary.translated_blocks ?? 0} of {result.summary.total_text_blocks} blocks translated
-                      {result.summary.domain && ` · domain: ${result.summary.domain}`}
+                    <h2 className="font-semibold text-zinc-900">Translation complete</h2>
+                    <p className="text-sm text-zinc-400 mt-0.5">
+                      {result.summary.translated_blocks??0} of {result.summary.total_text_blocks} blocks
+                      {result.summary.domain && ` · ${result.summary.domain}`}
                       {result.summary.elapsed_seconds && ` · ${result.summary.elapsed_seconds}s`}
                     </p>
                   </div>
+                  <span className="text-2xl font-bold text-zinc-900">{qualityPct}%</span>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                {/* Thin progress bar showing quality */}
+                <div className="h-1.5 bg-zinc-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-zinc-900 rounded-full transition-all" style={{width:`${qualityPct}%`}}/>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4 pt-1">
                   {[
-                    { label: "Pages",      value: result.summary.total_pages },
-                    { label: "Blocks",     value: result.summary.total_text_blocks },
-                    { label: "Translated", value: result.summary.translated_blocks ?? 0 },
-                    { label: "Quality",    value: `${Math.round(((result.summary.translated_blocks ?? 0) / Math.max(1, result.summary.total_text_blocks)) * 100)}%` },
-                  ].map((stat) => (
-                    <div key={stat.label} className="bg-gray-50 rounded-xl p-3 text-center">
-                      <p className="text-2xl font-bold text-gray-900">{stat.value}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{stat.label}</p>
+                    { label:"Pages",  value:result.summary.total_pages },
+                    { label:"Blocks", value:result.summary.total_text_blocks },
+                    { label:"Overflow", value:result.summary.overflow_count??0 },
+                  ].map(s => (
+                    <div key={s.label} className="text-center">
+                      <p className="text-xl font-semibold text-zinc-900">{s.value}</p>
+                      <p className="text-xs text-zinc-400 mt-0.5">{s.label}</p>
                     </div>
                   ))}
                 </div>
-
-                {/* Action buttons */}
-                <div className="flex flex-wrap gap-3">
-                  <button type="button" onClick={() => void handleDownload()} disabled={downloading || !jobId}
-                    className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-md shadow-blue-100"
-                  >
-                    {downloading ? <><Loader2 className="w-5 h-5 animate-spin" /> Downloading…</> : <><Download className="w-5 h-5" /> Download PDF</>}
-                  </button>
-                  <button type="button" onClick={() => setScreen("review")} disabled={!jobId}
-                    className="flex items-center gap-2 px-5 py-3 border border-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-50 disabled:opacity-40 transition-colors"
-                  >
-                    <Pencil className="w-4 h-4" /> Back to Review
-                  </button>
-                  {jobId && (
-                    <button type="button" onClick={() => setShowSideBySide(s => !s)}
-                      className={`flex items-center gap-2 px-5 py-3 border rounded-xl font-medium transition-colors ${showSideBySide ? "border-blue-400 bg-blue-50 text-blue-700" : "border-gray-200 text-gray-700 hover:bg-gray-50"}`}
-                    >
-                      <SplitSquareHorizontal className="w-4 h-4" />
-                      {showSideBySide ? "Hide" : "Side-by-Side"} Preview
-                    </button>
-                  )}
-                  <button type="button" onClick={resetFlow} className="px-5 py-3 border border-gray-200 text-gray-500 font-medium rounded-xl hover:bg-gray-50 transition-colors ml-auto">
-                    Translate Another
-                  </button>
-                </div>
-
-                {downloadError && (
-                  <div className="mt-4 bg-red-50 border border-red-100 p-3 rounded-lg flex gap-2 text-red-700 text-sm">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" /><p>{downloadError}</p>
-                  </div>
-                )}
               </div>
 
-              {/* Side-by-Side Viewer */}
+              {/* Actions */}
+              <div className="flex flex-wrap gap-2.5">
+                <button onClick={() => void handleDownload()} disabled={downloading||!jobId}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-zinc-900 text-white text-sm font-semibold rounded-xl hover:bg-zinc-700 disabled:opacity-40 transition-colors"
+                >
+                  {downloading ? <><Loader2 className="w-4 h-4 animate-spin"/>Downloading…</> : <><Download className="w-4 h-4"/>Download PDF</>}
+                </button>
+                <button onClick={() => setScreen("review")} disabled={!jobId}
+                  className="flex items-center gap-2 px-4 py-2.5 border border-zinc-200 text-sm text-zinc-600 rounded-xl hover:bg-zinc-50 disabled:opacity-40 transition-colors"
+                >
+                  <Pencil className="w-4 h-4"/>Review
+                </button>
+                {jobId && (
+                  <button onClick={() => setSideBySide(s=>!s)}
+                    className={`flex items-center gap-2 px-4 py-2.5 border text-sm rounded-xl transition-colors ${sideBySide?"border-zinc-900 bg-zinc-50 text-zinc-900":"border-zinc-200 text-zinc-500 hover:bg-zinc-50"}`}
+                  >
+                    <SplitSquareHorizontal className="w-4 h-4"/>Compare
+                  </button>
+                )}
+                <button onClick={reset} className="ml-auto text-sm text-zinc-400 hover:text-zinc-700 px-4 py-2.5 transition-colors">
+                  Translate another →
+                </button>
+              </div>
+
+              {dlError && (
+                <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+                  <AlertCircle className="w-4 h-4 shrink-0"/>{dlError}
+                </div>
+              )}
+
+              {/* Side-by-side */}
               <AnimatePresence>
-                {showSideBySide && jobId && (
-                  <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}>
-                    <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                      <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
-                        <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
-                          <SplitSquareHorizontal className="w-4 h-4 text-blue-500" />
-                          Side-by-Side Preview
-                        </div>
-                        <p className="text-[11px] text-gray-400">If PDF does not appear, use the open link below each panel.</p>
-                      </div>
-                      <div className="grid grid-cols-2 divide-x divide-gray-200" style={{ height: "75vh" }}>
-                        <div className="flex flex-col">
-                          <div className="bg-gray-50 px-4 py-2 border-b border-gray-100 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <Eye className="w-3.5 h-3.5 text-gray-400" />
-                              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Original</span>
-                            </div>
-                            <a href={`/api/jobs/${jobId}/original`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[11px] text-blue-500 hover:underline">
-                              <ExternalLink className="w-3 h-3" /> Open
+                {sideBySide && jobId && (
+                  <motion.div initial={{opacity:0,y:8}} animate={{opacity:1,y:0}} exit={{opacity:0,y:8}}
+                    className="border border-zinc-200 rounded-xl overflow-hidden"
+                  >
+                    <div className="border-b border-zinc-100 px-4 py-2.5 flex items-center justify-between">
+                      <p className="text-xs font-medium text-zinc-500">Side-by-side comparison</p>
+                      <p className="text-[11px] text-zinc-300">If PDF doesn't load, use Open links</p>
+                    </div>
+                    <div className="grid grid-cols-2 divide-x divide-zinc-100" style={{height:"72vh"}}>
+                      {[
+                        { label:"Original", href:`/api/jobs/${jobId}/original`, src:`/api/jobs/${jobId}/original` },
+                        { label:"Translated", href:`/api/jobs/${jobId}/preview`, src:`/api/jobs/${jobId}/preview` },
+                      ].map(p => (
+                        <div key={p.label} className="flex flex-col">
+                          <div className="flex items-center justify-between px-4 py-2 bg-zinc-50 border-b border-zinc-100">
+                            <span className="text-[11px] font-medium text-zinc-500">{p.label}</span>
+                            <a href={p.href} target="_blank" rel="noopener noreferrer"
+                              className="flex items-center gap-1 text-[11px] text-blue-500 hover:underline">
+                              <ExternalLink className="w-3 h-3"/>Open
                             </a>
                           </div>
-                          <iframe src={`/api/jobs/${jobId}/original`} title="Original PDF" className="flex-1 w-full border-0" />
+                          <iframe src={p.src} title={p.label} className="flex-1 w-full border-0"/>
                         </div>
-                        <div className="flex flex-col">
-                          <div className="bg-blue-50 px-4 py-2 border-b border-blue-100 flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <CheckCircle2 className="w-3.5 h-3.5 text-blue-500" />
-                              <span className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Translated</span>
-                            </div>
-                            <a href={`/api/jobs/${jobId}/preview`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[11px] text-blue-500 hover:underline">
-                              <ExternalLink className="w-3 h-3" /> Open
-                            </a>
-                          </div>
-                          <iframe src={`/api/jobs/${jobId}/preview`} title="Translated PDF" className="flex-1 w-full border-0" />
-                        </div>
-                      </div>
+                      ))}
                     </div>
                   </motion.div>
                 )}
               </AnimatePresence>
 
-              {/* Block summary table */}
+              {/* Block preview table */}
               {result.blocks.length > 0 && (
-                <div className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                  <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-                    <h3 className="font-semibold text-gray-800 text-sm">Translation Summary</h3>
-                    <span className="text-xs text-gray-400">First 50 blocks shown</span>
+                <div className="border border-zinc-200 rounded-xl overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-100">
+                    <p className="text-sm font-medium text-zinc-700">Block preview</p>
+                    <p className="text-xs text-zinc-400">first 30 shown</p>
                   </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="bg-gray-50 border-b border-gray-100">
-                          <th className="px-4 py-2.5 text-left text-[10px] uppercase font-bold text-gray-400 tracking-wider w-12">Pg</th>
-                          <th className="px-4 py-2.5 text-left text-[10px] uppercase font-bold text-gray-400 tracking-wider">Original</th>
-                          <th className="px-4 py-2.5 text-left text-[10px] uppercase font-bold text-gray-400 tracking-wider">Myanmar</th>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-zinc-50">
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium w-10">Pg</th>
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium">Original</th>
+                        <th className="text-left px-4 py-2.5 text-xs text-zinc-400 font-medium">Myanmar</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-50">
+                      {result.blocks.slice(0,30).map((b,i) => (
+                        <tr key={i} className="hover:bg-zinc-50/50">
+                          <td className="px-4 py-2.5 text-xs text-zinc-300 font-mono align-top">{b.page_number}</td>
+                          <td className="px-4 py-2.5 text-xs text-zinc-600 align-top max-w-[200px]"><span className="line-clamp-2">{b.text}</span></td>
+                          <td className="px-4 py-2.5 text-xs align-top max-w-[200px]">
+                            {b.myanmar_text
+                              ? <span className="text-zinc-900 line-clamp-2">{b.myanmar_text}</span>
+                              : <span className="text-zinc-200">—</span>}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-50">
-                        {result.blocks.slice(0, 50).map((b, i) => (
-                          <tr key={i} className="hover:bg-gray-50/50">
-                            <td className="px-4 py-2.5 text-xs text-gray-400 font-mono align-top">{b.page_number}</td>
-                            <td className="px-4 py-2.5 text-xs text-gray-600 align-top max-w-[200px]"><span className="line-clamp-2">{b.text}</span></td>
-                            <td className="px-4 py-2.5 text-xs align-top max-w-[200px]">
-                              {b.myanmar_text ? <span className="text-gray-800 line-clamp-2">{b.myanmar_text}</span> : <span className="text-gray-300 italic">—</span>}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </motion.div>
           )}
+
         </AnimatePresence>
       </main>
     </div>
